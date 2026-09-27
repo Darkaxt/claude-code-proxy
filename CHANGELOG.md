@@ -3,6 +3,32 @@ title: Changelog
 description: Release notes for claude-code-proxy.
 ---
 
+## v0.1.42 (2026-09-23)
+
+- Codex users can select GPT-6 Sol and GPT-6 Luna, including their `-fast`
+  priority-tier variants.
+  ([#165](https://github.com/raine/claude-code-proxy/pull/165))
+- Codex now defaults to GPT-6 Sol. Opus and Fable aliases use GPT-6 Sol,
+  Haiku aliases use GPT-6 Luna, and the Claude Opus 5.5 alias is supported.
+  Sonnet remains on GPT-5.6 Terra.
+  ([#165](https://github.com/raine/claude-code-proxy/pull/165))
+- Grok users can select Grok 4.7 with `grok-4.7`.
+  ([#162](https://github.com/raine/claude-code-proxy/pull/162))
+
+## v0.1.41 (2026-09-19)
+
+- Long Codex requests on the HTTP transport no longer hang for minutes and then
+  fail: the proxy waits five minutes for the response headers instead of one,
+  configurable with `CCP_CODEX_HEADER_TIMEOUT_MS` or `codex.headerTimeoutMs`,
+  and a timeout there fails the request once rather than re-sending it.
+  ([#160](https://github.com/raine/claude-code-proxy/pull/160))
+- The installer correctly reports the existing version during upgrades instead
+  of showing it as unknown.
+  ([#157](https://github.com/raine/claude-code-proxy/issues/157))
+- Codex requests use the current session header for cache affinity, improving
+  compatibility with intermediaries that reject the legacy header.
+  ([#156](https://github.com/raine/claude-code-proxy/pull/156))
+
 ## v0.1.40 (2026-09-14)
 
 - Attach one or more monitor dashboards to a background proxy with

@@ -101,7 +101,7 @@ impl CodexProvider {
     ) -> Response {
         let message_id = format!("msg_{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
         let want_stream = body.stream;
-        let model = body.model.as_deref().unwrap_or("gpt-5.6-sol");
+        let model = body.model.as_deref().unwrap_or("gpt-6-sol");
 
         let mut resolved =
             resolve_model_request_with_config_override(model, !body.bypass_provider_model_override);
@@ -579,7 +579,7 @@ impl Provider for CodexProvider {
     }
 
     async fn handle_count_tokens(&self, body: MessagesRequest, ctx: RequestContext) -> Response {
-        let model = body.model.as_deref().unwrap_or("gpt-5.6-sol");
+        let model = body.model.as_deref().unwrap_or("gpt-6-sol");
         let mut resolved =
             resolve_model_request_with_config_override(model, !body.bypass_provider_model_override);
         if let Err(e) = assert_allowed_model(&resolved.model) {
@@ -758,10 +758,13 @@ async fn live_stream_response(
     let mut empty_retry = false;
     let mut retry_started = None;
     let mut continuation = Some(continuation);
+    let configured_transport = transport;
+    let mut active_transport = transport;
+    let mut http_fallback_attempted = false;
 
     loop {
         let open_stream = async {
-            match transport {
+            match active_transport {
                 config::CodexTransport::Http => {
                     client
                         .stream_codex_http_events_for_owner(&request_body, &ctx)
@@ -800,6 +803,19 @@ async fn live_stream_response(
         {
             Ok(events) => events,
             Err(()) => {
+                if !empty_retry
+                    && switch_exhausted_websocket_to_http(
+                        configured_transport,
+                        &mut active_transport,
+                        &mut http_fallback_attempted,
+                        &mut continuation,
+                        &mut retry_started,
+                        &ctx,
+                        attempt,
+                    )
+                {
+                    continue;
+                }
                 if empty_retry {
                     log_empty_completion_retry(&ctx, attempt, started_at.elapsed(), None);
                 }
@@ -832,6 +848,19 @@ async fn live_stream_response(
                 if attempt >= MAX_RETRYABLE_LIVE_STREAM_RETRIES
                     || (empty_retry && !allow_empty_completion_retry(attempt, started_at.elapsed()))
                 {
+                    if !empty_retry
+                        && switch_exhausted_websocket_to_http(
+                            configured_transport,
+                            &mut active_transport,
+                            &mut http_fallback_attempted,
+                            &mut continuation,
+                            &mut retry_started,
+                            &ctx,
+                            attempt,
+                        )
+                    {
+                        continue;
+                    }
                     cleanup.abort();
                     if empty_retry {
                         log_empty_completion_retry(&ctx, attempt, started_at.elapsed(), None);
@@ -841,6 +870,17 @@ async fn live_stream_response(
                 }
                 let delay = compute_backoff_delay(attempt, err.retry_after.as_deref());
                 if delay.exceeds_budget {
+                    if switch_exhausted_websocket_to_http(
+                        configured_transport,
+                        &mut active_transport,
+                        &mut http_fallback_attempted,
+                        &mut continuation,
+                        &mut retry_started,
+                        &ctx,
+                        attempt,
+                    ) {
+                        continue;
+                    }
                     cleanup.abort();
                     return exhausted_recovery_response(&ctx, attempt, &err);
                 }
@@ -868,7 +908,7 @@ async fn live_stream_response(
                 client: client.clone(),
                 attempts: attempt,
                 deadline: retry_started.map(|at| at + EMPTY_COMPLETION_RETRY_BUDGET),
-                websocket: transport != config::CodexTransport::Http,
+                websocket: active_transport != config::CodexTransport::Http,
             },
             upstream_events,
             message_id.clone(),
@@ -891,6 +931,19 @@ async fn live_stream_response(
         {
             Ok(started) => started,
             Err(()) => {
+                if !empty_retry
+                    && switch_exhausted_websocket_to_http(
+                        configured_transport,
+                        &mut active_transport,
+                        &mut http_fallback_attempted,
+                        &mut continuation,
+                        &mut retry_started,
+                        &ctx,
+                        attempt,
+                    )
+                {
+                    continue;
+                }
                 if empty_retry {
                     log_empty_completion_retry(&ctx, attempt, started_at.elapsed(), None);
                 }
@@ -960,11 +1013,33 @@ async fn live_stream_response(
                         cleanup.abort();
                         return map_codex_error_to_response(&empty_live_completion_error());
                     }
+                    if switch_exhausted_websocket_to_http(
+                        configured_transport,
+                        &mut active_transport,
+                        &mut http_fallback_attempted,
+                        &mut continuation,
+                        &mut retry_started,
+                        &ctx,
+                        attempt,
+                    ) {
+                        continue;
+                    }
                     cleanup.abort();
                     return exhausted_recovery_response(&ctx, attempt, &error);
                 }
                 let delay = compute_backoff_delay(attempt, error.retry_after.as_deref());
                 if delay.exceeds_budget {
+                    if switch_exhausted_websocket_to_http(
+                        configured_transport,
+                        &mut active_transport,
+                        &mut http_fallback_attempted,
+                        &mut continuation,
+                        &mut retry_started,
+                        &ctx,
+                        attempt,
+                    ) {
+                        continue;
+                    }
                     cleanup.abort();
                     return exhausted_recovery_response(&ctx, attempt, &error);
                 }
@@ -990,6 +1065,38 @@ async fn live_stream_response(
             }
         }
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn switch_exhausted_websocket_to_http(
+    configured_transport: config::CodexTransport,
+    active_transport: &mut config::CodexTransport,
+    http_fallback_attempted: &mut bool,
+    continuation: &mut Option<ContinuationReservation>,
+    retry_started: &mut Option<Instant>,
+    ctx: &RequestContext,
+    attempt: u32,
+) -> bool {
+    if configured_transport != config::CodexTransport::WebSocket
+        || *active_transport != config::CodexTransport::WebSocket
+        || *http_fallback_attempted
+    {
+        return false;
+    }
+
+    drop_live_continuation_for_retry(continuation);
+    *active_transport = config::CodexTransport::Http;
+    *http_fallback_attempted = true;
+    // The exhausted WebSocket recovery deadline must not shorten the existing
+    // HTTP transport's own response-header and body-idle boundaries.
+    *retry_started = None;
+    recovery::notify(
+        ctx,
+        "reconnecting",
+        attempt,
+        "WebSocket recovery exhausted before output; retrying once over HTTP",
+    );
+    true
 }
 
 // Bound replay work only. Once real output is forwarded, this wrapper is gone
@@ -2033,6 +2140,7 @@ fn format_auth_saved_output(auth_path: &str, account_id: Option<&str>) -> String
 mod tests {
     use futures_util::{SinkExt, StreamExt};
     use http_body_util::BodyExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
     use tokio_tungstenite::tungstenite::Message;
 
@@ -2109,7 +2217,6 @@ mod tests {
             base_url,
             1_000,
             1_000,
-            0,
         );
         client
             .auth_manager()
@@ -2144,6 +2251,43 @@ mod tests {
             .send(Message::Text(event.to_string()))
             .await
             .unwrap();
+    }
+
+    async fn serve_live_http_response(stream: &mut TcpStream, events: &[serde_json::Value]) {
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        let header_end = loop {
+            let read = stream.read(&mut buffer).await.unwrap();
+            assert!(read > 0, "HTTP fallback request closed before headers");
+            request.extend_from_slice(&buffer[..read]);
+            if let Some(end) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                break end + 4;
+            }
+        };
+        let headers = String::from_utf8_lossy(&request[..header_end]);
+        assert!(headers.starts_with("POST /responses HTTP/1.1"), "{headers}");
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().unwrap())
+            })
+            .unwrap_or_default();
+        while request.len() - header_end < content_length {
+            let read = stream.read(&mut buffer).await.unwrap();
+            assert!(read > 0, "HTTP fallback request closed before its body");
+            request.extend_from_slice(&buffer[..read]);
+        }
+
+        let body = upstream_sse(events);
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            body.len()
+        );
+        stream.write_all(response.as_bytes()).await.unwrap();
+        stream.write_all(&body).await.unwrap();
+        stream.shutdown().await.unwrap();
     }
 
     fn upstream_sse(events: &[serde_json::Value]) -> Vec<u8> {
@@ -2272,6 +2416,8 @@ mod tests {
             ("gpt-5.6-luna", "gpt-5.6-sol"),
             ("gpt-5.6-sol", "gpt-5.6-sol"),
             ("gpt-5.6-terra", "gpt-5.6-terra"),
+            ("gpt-6-luna", "gpt-6-sol"),
+            ("gpt-6-sol", "gpt-6-sol"),
             ("gpt-5.4", "gpt-5.4"),
         ] {
             let mut model = resolved.to_string();
@@ -2289,6 +2435,8 @@ mod tests {
         for (resolved, lite_expected) in [
             ("gpt-5.6-luna", true),
             ("gpt-5.6-sol", true),
+            ("gpt-6-luna", true),
+            ("gpt-6-sol", true),
             ("gpt-5.4", false),
         ] {
             let mut model = resolved.to_string();
@@ -2472,6 +2620,9 @@ mod tests {
         assert!(models.contains(&"gpt-5.6-sol-fast".to_string()));
         assert!(models.contains(&"gpt-5.6-terra".to_string()));
         assert!(models.contains(&"gpt-5.6-luna".to_string()));
+        assert!(models.contains(&"gpt-6-sol".to_string()));
+        assert!(models.contains(&"gpt-6-sol-fast".to_string()));
+        assert!(models.contains(&"gpt-6-luna".to_string()));
         assert!(models.contains(&"gpt-5.4".to_string()));
         assert!(models.contains(&"gpt-5.4-mini".to_string()));
     }
@@ -2570,7 +2721,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reconnect_stops_after_three_attempts_even_when_thinking_restarts() {
+    async fn reconnect_exhaustion_falls_back_once_to_http_before_output() {
         use http_body_util::BodyExt as _;
         let _pool_guard = websocket::lock_codex_websocket_pool_for_tests().await;
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2580,9 +2731,20 @@ mod tests {
                 let (socket, _) = listener.accept().await.unwrap();
                 let mut socket = tokio_tungstenite::accept_async(socket).await.unwrap();
                 let _ = next_live_websocket_request(&mut socket).await;
-                emit_live_event(&mut socket, &serde_json::json!({"type":"response.reasoning_summary_text.delta","output_index":0,"delta":"Thinking"})).await;
                 drop(socket);
             }
+
+            let (mut stream, _) = listener.accept().await.unwrap();
+            serve_live_http_response(
+                &mut stream,
+                &[
+                    serde_json::json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"http-recovered"}}),
+                    serde_json::json!({"type":"response.output_text.delta","output_index":0,"delta":"Recovered over HTTP"}),
+                    serde_json::json!({"type":"response.output_item.done","output_index":0,"item":{"type":"message"}}),
+                    serde_json::json!({"type":"response.completed","response":{"status":"completed","usage":{}}}),
+                ],
+            )
+            .await;
             assert!(
                 tokio::time::timeout(Duration::from_secs(1), listener.accept())
                     .await
@@ -2611,8 +2773,10 @@ mod tests {
             .unwrap()
             .to_bytes();
         let text = String::from_utf8(bytes.to_vec()).unwrap();
-        assert!(text.contains("Connection recovery failed"), "{text}");
+        assert!(text.contains("Recovered over HTTP"), "{text}");
+        assert!(!text.contains("event: error"), "{text}");
         assert_eq!(text.matches("event: message_start").count(), 1, "{text}");
+        assert_eq!(text.matches("event: message_stop").count(), 1, "{text}");
         server.await.unwrap();
     }
 
