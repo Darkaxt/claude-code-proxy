@@ -35,9 +35,11 @@ the proxy remain healthy.
 
 ## Staged execution
 
-1. ACTIVE - Integrate the v0.1.42 baseline with PR 158, add the failing
-   regression test, implement the single fallback, and run focused verification.
-2. NOT STARTED - Build and stage the Windows binary; verify the artifact.
+1. COMPLETE - Integrated the v0.1.42 baseline with PR 158 and the preserved
+   compaction patch. The regression test failed before the fix and passed after
+   it; all 421 Codex-provider tests pass after restricting fallback to
+   connection and 5xx failures.
+2. ACTIVE - Build and stage the Windows binary; verify the artifact.
 3. NOT STARTED - Replace and restart only when the active proxy can be switched
    without cutting an in-flight request; verify health and configuration.
 

@@ -824,6 +824,7 @@ async fn live_stream_response(
                         &mut retry_started,
                         &ctx,
                         attempt,
+                        None,
                     )
                 {
                     continue;
@@ -869,6 +870,7 @@ async fn live_stream_response(
                             &mut retry_started,
                             &ctx,
                             attempt,
+                            Some(&err),
                         )
                     {
                         continue;
@@ -890,6 +892,7 @@ async fn live_stream_response(
                         &mut retry_started,
                         &ctx,
                         attempt,
+                        Some(&err),
                     ) {
                         continue;
                     }
@@ -952,6 +955,7 @@ async fn live_stream_response(
                         &mut retry_started,
                         &ctx,
                         attempt,
+                        None,
                     )
                 {
                     continue;
@@ -1033,6 +1037,7 @@ async fn live_stream_response(
                         &mut retry_started,
                         &ctx,
                         attempt,
+                        Some(&error),
                     ) {
                         continue;
                     }
@@ -1049,6 +1054,7 @@ async fn live_stream_response(
                         &mut retry_started,
                         &ctx,
                         attempt,
+                        Some(&error),
                     ) {
                         continue;
                     }
@@ -1088,11 +1094,20 @@ fn switch_exhausted_websocket_to_http(
     retry_started: &mut Option<Instant>,
     ctx: &RequestContext,
     attempt: u32,
+    error: Option<&client::CodexError>,
 ) -> bool {
     if configured_transport != config::CodexTransport::WebSocket
         || *active_transport != config::CodexTransport::WebSocket
         || *http_fallback_attempted
     {
+        return false;
+    }
+    if error.is_some_and(|error| {
+        !matches!(
+            error.origin,
+            client::CodexErrorOrigin::WebSocket | client::CodexErrorOrigin::WebSocketHandshake
+        ) || !(error.status == 0 || matches!(error.status, 500 | 502 | 503 | 504 | 529))
+    }) {
         return false;
     }
 
