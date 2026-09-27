@@ -39,9 +39,14 @@ the proxy remain healthy.
    compaction patch. The regression test failed before the fix and passed after
    it; all 421 Codex-provider tests pass after restricting fallback to
    connection and 5xx failures.
-2. ACTIVE - Build and stage the Windows binary; verify the artifact.
-3. NOT STARTED - Replace and restart only when the active proxy can be switched
-   without cutting an in-flight request; verify health and configuration.
+2. COMPLETE - Built and staged `0.1.42-pr158.compaction3`; the staged Windows
+   binary reports the custom version and has SHA-256
+   `5302CD4D26569FB030052D5691C5E6541E76C73A93FBF7709624353F5F3E2191`.
+3. COMPLETE - Waited for zero active proxy requests, stopped the owning
+   supervisor through its explicit event, replaced the binary, and relaunched
+   the same hidden supervisor. The installed binary hash matches the staged
+   artifact, `/monitor` responds on port 8317, and the unchanged configuration
+   still selects WebSocket with continuation and server compaction enabled.
 
 Blockers: none.
 
