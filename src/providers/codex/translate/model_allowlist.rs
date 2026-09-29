@@ -17,6 +17,7 @@ pub const ALLOWED_MODELS: &[&str] = &[
     "gpt-6-astra",
     "gpt-6-luna",
     "gpt-6-sol",
+    "gpt-6.1-sol",
 ];
 
 pub const MODEL_ALIASES: &[(&str, &str)] = &[
@@ -130,6 +131,7 @@ pub fn uses_responses_lite(model: &str) -> bool {
             | "gpt-6-astra"
             | "gpt-6-luna"
             | "gpt-6-sol"
+            | "gpt-6.1-sol"
     )
 }
 
@@ -159,6 +161,17 @@ pub fn is_valid_model_for_codex(model: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gpt_6_1_sol_is_allowed_and_uses_responses_lite() {
+        assert!(assert_allowed_model("gpt-6.1-sol").is_ok());
+        assert!(is_valid_model_for_codex("gpt-6.1-sol"));
+        assert!(uses_responses_lite("gpt-6.1-sol"));
+        assert_eq!(full_lane_web_search_model("gpt-6.1-sol"), "gpt-6.1-sol");
+        let resolved = resolve_model_request("gpt-6.1-sol-fast");
+        assert_eq!(resolved.model, "gpt-6.1-sol");
+        assert_eq!(resolved.service_tier, Some(ServiceTier::Priority));
+    }
 
     #[test]
     fn haiku_resolves_to_luna() {
