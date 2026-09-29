@@ -2,9 +2,7 @@ use http::StatusCode;
 use serde_json::{Map, Value, json};
 
 use crate::providers::codex::translate::{
-    model_allowlist::{
-        ALLOWED_MODELS, assert_allowed_model, resolve_model_request, uses_responses_lite,
-    },
+    model_allowlist::{assert_allowed_model, resolve_model_request, uses_responses_lite},
     request::{Effort, resolve_effort_override, to_codex_effort},
 };
 use crate::{config, registry::normalize_incoming_model};
@@ -55,7 +53,7 @@ fn translate_request_with_override(
             format!(
                 "Model '{requested_model}' resolves to unsupported model '{}'. Supported: {}",
                 error.model,
-                ALLOWED_MODELS.join(", ")
+                crate::codex_models::base_models().join(", ")
             ),
             Some("model"),
             Some("model_not_supported"),

@@ -1,24 +1,6 @@
-use std::collections::HashSet;
-
-use crate::config;
+use crate::{codex_models, config};
 
 use super::request::ServiceTier;
-
-pub const ALLOWED_MODELS: &[&str] = &[
-    "gpt-5.2",
-    "gpt-5.3-codex",
-    "gpt-5.3-codex-spark",
-    "gpt-5.4",
-    "gpt-5.4-mini",
-    "gpt-5.5",
-    "gpt-5.6-luna",
-    "gpt-5.6-sol",
-    "gpt-5.6-terra",
-    "gpt-6-astra",
-    "gpt-6-luna",
-    "gpt-6-sol",
-    "gpt-6.1-sol",
-];
 
 pub const MODEL_ALIASES: &[(&str, &str)] = &[
     ("haiku", "gpt-6-luna"),
@@ -43,14 +25,10 @@ pub struct ResolvedModel {
     pub service_tier: Option<ServiceTier>,
 }
 
-fn fast_model_aliases() -> HashSet<String> {
-    ALLOWED_MODELS.iter().map(|m| format!("{m}-fast")).collect()
-}
-
 fn resolve_fast_model_alias(model: &str) -> ResolvedModel {
-    let fast_set = fast_model_aliases();
-    if fast_set.contains(model) {
-        let base = model.trim_end_matches("-fast");
+    if let Some(base) = model.strip_suffix("-fast")
+        && codex_models::catalog().contains_key(base)
+    {
         ResolvedModel {
             model: base.to_string(),
             service_tier: Some(ServiceTier::Priority),
@@ -113,7 +91,7 @@ impl std::fmt::Display for ModelNotAllowedError {
 }
 
 pub fn assert_allowed_model(model: &str) -> Result<(), ModelNotAllowedError> {
-    if ALLOWED_MODELS.contains(&model) {
+    if codex_models::catalog().contains_key(model) {
         Ok(())
     } else {
         Err(ModelNotAllowedError {
@@ -123,16 +101,7 @@ pub fn assert_allowed_model(model: &str) -> Result<(), ModelNotAllowedError> {
 }
 
 pub fn uses_responses_lite(model: &str) -> bool {
-    matches!(
-        model,
-        "gpt-5.6-luna"
-            | "gpt-5.6-sol"
-            | "gpt-5.6-terra"
-            | "gpt-6-astra"
-            | "gpt-6-luna"
-            | "gpt-6-sol"
-            | "gpt-6.1-sol"
-    )
+    codex_models::catalog().get(model).copied().unwrap_or(false)
 }
 
 /// Luna models exist only behind the Responses Lite lane; the full
@@ -148,11 +117,14 @@ pub fn full_lane_web_search_model(model: &str) -> &str {
 }
 
 pub fn is_valid_model_for_codex(model: &str) -> bool {
-    if ALLOWED_MODELS.contains(&model) {
+    let models = codex_models::catalog();
+    if models.contains_key(model) {
         return true;
     }
-    let fast_set = fast_model_aliases();
-    if fast_set.contains(model) {
+    if model
+        .strip_suffix("-fast")
+        .is_some_and(|base| models.contains_key(base))
+    {
         return true;
     }
     MODEL_ALIASES.iter().any(|(alias, _)| *alias == model)

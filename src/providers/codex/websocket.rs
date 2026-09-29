@@ -2048,7 +2048,7 @@ where
     let mut sse_body: Vec<u8> = Vec::new();
     let mut terminal_event: Option<WsEvent> = None;
     let response_event_budget = Duration::from_millis(idle_timeout_ms);
-    let response_wait_started = Instant::now();
+    let response_wait_started = tokio::time::Instant::now();
     let mut last_response_event_at = response_wait_started;
     let mut response_started = false;
 
@@ -2142,7 +2142,7 @@ where
 
                 if is_response_event(&parsed) {
                     response_started = true;
-                    last_response_event_at = Instant::now();
+                    last_response_event_at = tokio::time::Instant::now();
                 }
 
                 // Check for terminal events
@@ -4247,8 +4247,9 @@ mod tests {
         assert!(error.message.contains("keepalive error"));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn keepalive_pongs_do_not_extend_response_start_timeout() {
+        let started_at = tokio::time::Instant::now();
         let (client_io, server_io) = tokio::io::duplex(1024);
         let mut client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
         let mut server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
@@ -4284,6 +4285,7 @@ mod tests {
             Some(WEBSOCKET_RESPONSE_START_TIMEOUT_DETAIL)
         );
         assert!(ping_count.load(Ordering::SeqCst) >= 2);
+        assert_eq!(started_at.elapsed(), Duration::from_millis(50));
         server_task.abort();
     }
 
