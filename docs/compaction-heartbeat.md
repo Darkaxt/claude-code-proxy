@@ -22,17 +22,25 @@ Stages:
    disconnect cancellation and attempt-scoped cleanup. Server integration proves
    headers/ping precede blocked native compaction. Full regression suite passed,
    including replay, nonstream error statuses and ordinary WebSocket transport.
-2. BLOCKED: R5 release build, idle-boundary deployment, live verification,
+2. COMPLETE: R5 release build, idle-boundary deployment, live verification,
    final reconciliation, commit and expendable-artifact cleanup.
    Release build and isolated real-account verification passed. Compact request
    returned HTTP 200 headers in 45 ms, first SSE event ping, then message_stop
    after 6.9 seconds. Full suite evidence applies to unchanged implementation;
    only package version metadata changed afterward and was verified in release.
 
-External blocker: execution policy rejected the combined live deployment command
-before any operation ran. R5 installed-proxy verification remains unsatisfied.
-Resolving this requires an allowed live deployment execution path; do not bypass
-the rejection with another shell or wrapper. Live proxy remains compaction3.sol61.
+Combined commands were rejected before execution. User requested individually
+evaluated deployment steps; all normal rollback-copy, supervisor stop, binary
+replacement and hidden-launch steps were accepted separately. Deployment on
+2026-10-02 preserved configuration and Claude settings SHA-256 hashes.
+Installed version compaction4.catalog1 and candidate hash verified. Live health
+passed; compact request returned headers in 51 ms, immediate ping in 57 ms,
+message_stop after 2.987 seconds, no SSE error. Ordinary Sol 6.1 inference returned
+200 and message_stop; logs confirm upstream transport websocket. Catalog lists
+Sol 6.1 and discovered Daybreak, excludes reserve. Zero active requests afterward.
+All R1-R5 satisfied; no blockers or deferrals. Implementation commit 60a127a.
+Transactional cleanup removed 818671455 bytes of expendable release/test output;
+staged candidate and defined rollback copies are intentionally retained.
 No deferrals. Existing catalog commit 0806b61 is included in the new binary;
 its already verified runtime configuration remains unchanged.
 

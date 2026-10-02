@@ -22,30 +22,33 @@ Stages:
    routing, fast variants, native and Chat Completions translation. Full
    regression suite passed; library suite also passed after making an existing
    keepalive test deterministic with the same Tokio clock as its protocol timer.
-2. BLOCKED: build, isolated runtime/live verification, installation and
+2. COMPLETE: build, isolated runtime/live verification, installation and
    deployment at an idle boundary, final verification, commit and cleanup.
    Build and isolated runtime verification passed: a running candidate imported
    Daybreak, excluded reserve, hot-added a manual model and fast variant, routed
    count_tokens, and hot-removed it with the same PID. Real Sol 6.1 inference
    returned HTTP 200 and message_stop over WebSocket/Responses Lite.
    Installed the JSON discovery configuration and refresh helper. Candidate
-   binary is staged but NOT yet installed; the live binary remains sol61.
+   binary was deployed on 2026-10-02 as compaction4.catalog1 together with the
+   compaction preparation heartbeat fix. Installed hash/version and live health
+   verified; live catalog imports Daybreak and Sol 6.1, excludes reserve. Ordinary
+   Sol 6.1 inference returned 200/message_stop; logs confirm WebSocket transport.
 
 Acceptance: add a future model via JSON and observe routing/listing without
 restarting; import only visible models and correct Lite metadata; malformed
 updates preserve last good data; all request APIs use the shared catalog;
 Sol 6.1 streamed live inference still succeeds.
 
-External blocker: safe deployment acceptance criterion requires zero active
-requests. Live monitor still reports two active requests. Pause both Claude
-threads, verify snapshot.active is empty, then stop the owned supervisor,
-replace its binary with the staged candidate, relaunch via start-hidden.vbs,
-and verify live health/catalog/inference. Live deployment and overall completion
-remain unsatisfied until then. No tracked deferrals.
+Safe deployment criterion satisfied: user paused ClaudeGPT; monitor reported zero
+active requests before stopping only the owned supervisor. All deployment steps
+were separately accepted by execution policy. Model/provider/OAuth configuration
+and Claude settings were preserved. All required verification is satisfied;
+no blockers or tracked deferrals. Catalog implementation commit 0806b61 is included
+in deployed implementation commit 60a127a. Expendable release output was cleaned.
 
 Staging/recovery directory:
-`C:/Users/darka/AppData/Local/Programs/claude-code-proxy/staging/v0.1.42-pr158.compaction3.catalog1`.
-Candidate SHA-256: `47D15F85D348C6D5CA33E503F771DFD99A051A0277A88B3DC275C40593A51D63`.
+`C:/Users/darka/AppData/Local/Programs/claude-code-proxy/staging/v0.1.42-pr158.compaction4.catalog1`.
+Candidate SHA-256: `61C1D1765A58EAC2178D8B15B2B17E21E7A557DD0023D1CDB02BDAFB6EAF5454`.
 Rollback: stop the supervisor, restore claude-code-proxy.rollback.exe as the
 installed claude-code-proxy.exe and build-info.rollback.json as build-info.json,
 then relaunch start-hidden.vbs. Old binaries ignore the separate catalog file.
