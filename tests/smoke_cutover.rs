@@ -1640,6 +1640,71 @@ async fn smoke_codex_http_server_compaction_fast_fails_usage_limit() {
 
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
+async fn smoke_streaming_compaction_headers_precede_blocked_native_compaction() {
+    let _guard = env_lock();
+    clear_all_compactions_for_tests();
+    let config = TempDir::new().unwrap();
+    write_auth(config.path(), "codex");
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream = format!("http://{}", listener.local_addr().unwrap());
+    let router = axum::Router::new().fallback({
+        let entered = entered.clone();
+        let release = release.clone();
+        move |body: String| {
+            let entered = entered.clone();
+            let release = release.clone();
+            async move {
+                let body: Value = serde_json::from_str(&body).unwrap();
+                let compact = body["input"].as_array().unwrap().last().unwrap()["type"] == "compaction_trigger";
+                let data = if compact {
+                    entered.notify_one();
+                    release.notified().await;
+                    concat!(
+                        "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"compaction\",\"encrypted_content\":\"opaque-history\"}}\n\n",
+                        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_compact\"}}\n\n"
+                    )
+                } else {
+                    concat!(
+                        "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"msg_summary\"}}\n\n",
+                        "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"portable summary with sufficient detail to anchor this compacted conversation\"}\n\n",
+                        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_summary\",\"usage\":{\"input_tokens\":100,\"output_tokens\":12}}}\n\n"
+                    )
+                };
+                ([(http::header::CONTENT_TYPE, "text/event-stream")], data)
+            }
+        }
+    });
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", upstream);
+    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "http");
+    let _compaction_env = EnvGuard::set("CCP_CODEX_SERVER_COMPACTION", "1");
+    use futures_util::FutureExt;
+    let response = call_messages_body(json!({
+        "model": "gpt-5.6-sol", "max_tokens": 64, "stream": true,
+        "system": "You are a helpful AI assistant tasked with summarizing conversations.",
+        "messages": [{"role": "user", "content": "old conversation"}]
+    }))
+    .now_or_never()
+    .expect("headers must not wait for upstream compaction");
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body();
+    let first = body.frame().await.unwrap().unwrap().into_data().unwrap();
+    assert!(String::from_utf8_lossy(&first).contains("event: ping"));
+    let summary = tokio::spawn(async move { body.collect().await.unwrap().to_bytes() });
+    entered.notified().await;
+    release.notify_one();
+    let data = summary.await.unwrap();
+    assert!(String::from_utf8_lossy(&data).contains("event: message_stop"));
+    assert!(String::from_utf8_lossy(&data).contains("portable summary"));
+    server.abort();
+    clear_all_compactions_for_tests();
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
 async fn smoke_codex_http_server_compaction_replays_native_history() {
     let _guard = env_lock();
     clear_all_compactions_for_tests();

@@ -240,6 +240,11 @@ impl CodexProvider {
         {
             let attempt = begin_compaction(session_id, &translated.model);
             compaction_attempt = Some(attempt);
+            let mut preparation_cleanup = LiveRequestStateCleanup::new(
+                ContinuationReservation::for_owner_turn(None, None),
+                Some(session_id.to_owned()),
+                Some(attempt),
+            );
             log_compaction_event(
                 "server_compaction_triggered",
                 &ctx,
@@ -289,6 +294,7 @@ impl CodexProvider {
                     );
                 }
             }
+            preparation_cleanup.disarm();
         } else if server_compaction_enabled
             && !compact_boundary
             && let Some(replay) = apply_compaction_replay(ctx.session_id.as_deref(), &translated)
@@ -567,7 +573,8 @@ impl Provider for CodexProvider {
     }
 
     async fn handle_messages(&self, body: MessagesRequest, ctx: RequestContext) -> Response {
-        self.handle_messages_inner(body, ctx, None).await
+        self.handle_messages_with_conversation_identity(body, ctx, None)
+            .await
     }
 
     async fn handle_messages_with_conversation_identity(
@@ -576,6 +583,17 @@ impl Provider for CodexProvider {
         ctx: RequestContext,
         conversation_identity: Option<ConversationIdentity>,
     ) -> Response {
+        if body.stream && is_compact_messages_request(&body) {
+            let provider = Self {
+                client: self.client.clone(),
+            };
+            return pending_compaction_response(async move {
+                provider
+                    .handle_messages_inner(body, ctx, conversation_identity)
+                    .await
+            })
+            .await;
+        }
         self.handle_messages_inner(body, ctx, conversation_identity)
             .await
     }
@@ -1430,6 +1448,76 @@ fn single_live_stream_response(chunk: Vec<u8>) -> Response {
     }))
 }
 
+async fn pending_compaction_response(
+    preparation: impl std::future::Future<Output = Response> + Send + 'static,
+) -> Response {
+    use futures_util::StreamExt;
+    use http_body_util::BodyExt;
+
+    // Preparation lives inside the response body. Dropping the body cancels it
+    // directly rather than leaving a detached compaction worker behind.
+    let preparation =
+        async move {
+            let response = preparation.await;
+            if response
+                .headers()
+                .get(http::header::CONTENT_TYPE)
+                .is_some_and(|value| value.as_bytes().starts_with(b"text/event-stream"))
+            {
+                return response.into_body();
+            }
+            let bytes = match response.into_body().collect().await {
+            Ok(body) => body.to_bytes(),
+            Err(error) => Bytes::from(serde_json::json!({
+                "type": "error", "error": {"type": "api_error", "message": error.to_string()}
+            }).to_string()),
+        };
+            Body::from(crate::anthropic::sse::encode_sse_event(
+                Some("error"),
+                &String::from_utf8_lossy(&bytes),
+            ))
+        };
+    let mut heartbeat = tokio::time::interval_at(
+        tokio::time::Instant::now() + LIVE_STREAM_HEARTBEAT_INTERVAL,
+        LIVE_STREAM_HEARTBEAT_INTERVAL,
+    );
+    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let stream = futures_util::stream::unfold(
+        (
+            Some(Box::pin(preparation)),
+            None::<axum::body::BodyDataStream>,
+            heartbeat,
+        ),
+        |(mut preparation, mut body, mut heartbeat)| async move {
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = heartbeat.tick() => {
+                        return Some((Ok::<Bytes, std::io::Error>(Bytes::from_static(
+                            b"event: ping\ndata: {\"type\":\"ping\"}\n\n"
+                        )), (preparation, body, heartbeat)));
+                    }
+                    prepared = async { preparation.as_mut().unwrap().await }, if preparation.is_some() => {
+                        preparation = None;
+                        body = Some(prepared.into_data_stream());
+                    }
+                    chunk = async { body.as_mut().unwrap().next().await }, if body.is_some() => {
+                        return chunk.map(|chunk| (
+                            chunk.map_err(std::io::Error::other), (preparation, body, heartbeat)
+                        ));
+                    }
+                }
+            }
+        },
+    );
+    let initial_ping = futures_util::stream::once(async {
+        Ok::<Bytes, std::io::Error>(Bytes::from_static(
+            b"event: ping\ndata: {\"type\":\"ping\"}\n\n",
+        ))
+    });
+    event_stream_response(initial_ping.chain(stream))
+}
+
 fn empty_live_stream_response() -> Response {
     event_stream_response(futures_util::stream::empty::<Result<Bytes, std::io::Error>>())
 }
@@ -2162,6 +2250,112 @@ mod tests {
     use tokio_tungstenite::tungstenite::Message;
 
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn compact_preparation_returns_headers_and_pings_before_completion() {
+        let (entered_tx, mut entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let preparation = async move {
+            entered_tx.send(()).unwrap();
+            release_rx.await.unwrap();
+            single_live_stream_response(
+                b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n".to_vec(),
+            )
+        };
+        let response = tokio::select! {
+            biased;
+            response = pending_compaction_response(preparation) => Some(response),
+            _ = &mut entered_rx => None,
+        };
+        assert!(
+            response.is_some(),
+            "headers must precede blocked preparation"
+        );
+        let response = response.unwrap();
+        assert_eq!(
+            response.headers()[http::header::CONTENT_TYPE],
+            "text/event-stream"
+        );
+        let mut body = response.into_body();
+        let first = body.frame().await.unwrap().unwrap().into_data().unwrap();
+        assert!(String::from_utf8_lossy(&first).contains("event: ping"));
+        assert!(futures_util::poll!(body.frame()).is_pending());
+        entered_rx.await.unwrap();
+        for _ in 0..22 {
+            tokio::time::advance(LIVE_STREAM_HEARTBEAT_INTERVAL).await;
+            let heartbeat = body.frame().await.unwrap().unwrap().into_data().unwrap();
+            assert!(String::from_utf8_lossy(&heartbeat).contains("event: ping"));
+        }
+        release_tx.send(()).unwrap();
+        let rest = body.collect().await.unwrap().to_bytes();
+        assert!(String::from_utf8_lossy(&rest).contains("event: message_stop"));
+    }
+
+    #[tokio::test]
+    async fn compact_preparation_forwards_json_error_as_sse_error() {
+        let response = pending_compaction_response(async {
+            json_error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "rate_limit_error",
+                "account quota exhausted",
+            )
+        })
+        .await;
+        let data = response.into_body().collect().await.unwrap().to_bytes();
+        let events = parse_sse_events(&data);
+        assert_eq!(events[0].event.as_deref(), Some("ping"));
+        assert_eq!(events[1].event.as_deref(), Some("error"));
+        let payload: serde_json::Value = serde_json::from_str(&events[1].data).unwrap();
+        assert_eq!(payload["error"]["type"], "rate_limit_error");
+        assert_eq!(payload["error"]["message"], "account quota exhausted");
+    }
+
+    #[tokio::test]
+    async fn compact_preparation_disconnect_drops_pending_work() {
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (dropped_tx, dropped_rx) = tokio::sync::oneshot::channel();
+        struct NotifyDrop(Option<tokio::sync::oneshot::Sender<()>>);
+        impl Drop for NotifyDrop {
+            fn drop(&mut self) {
+                let _ = self.0.take().unwrap().send(());
+            }
+        }
+        let response = pending_compaction_response(async move {
+            let _drop = NotifyDrop(Some(dropped_tx));
+            entered_tx.send(()).unwrap();
+            std::future::pending::<Response>().await
+        })
+        .await;
+        let mut body = response.into_body();
+        body.frame().await.unwrap().unwrap();
+        assert!(futures_util::poll!(body.frame()).is_pending());
+        entered_rx.await.unwrap();
+        drop(body);
+        dropped_rx.await.unwrap();
+    }
+
+    #[test]
+    fn compact_preparation_cleanup_is_attempt_scoped() {
+        let session = format!("preparation-cleanup-{}", uuid::Uuid::new_v4());
+        let first = begin_compaction(&session, "gpt-6.1-sol");
+        let cleanup = LiveRequestStateCleanup::new(
+            ContinuationReservation::for_owner_turn(None, None),
+            Some(session.clone()),
+            Some(first),
+        );
+        drop(cleanup);
+        assert!(!store_compaction(&session, first, vec![]));
+        let older = begin_compaction(&session, "gpt-6.1-sol");
+        let cleanup = LiveRequestStateCleanup::new(
+            ContinuationReservation::for_owner_turn(None, None),
+            Some(session.clone()),
+            Some(older),
+        );
+        let newer = begin_compaction(&session, "gpt-6.1-sol");
+        drop(cleanup);
+        assert!(store_compaction(&session, newer, vec![]));
+        compaction::clear_compaction(&session);
+    }
 
     #[test]
     fn compact_boundary_uses_http_without_rerouting_ordinary_websocket_requests() {
