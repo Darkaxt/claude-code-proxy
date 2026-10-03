@@ -480,10 +480,11 @@ async fn spawn_websocket_credited_rate_limit_upstream() -> String {
     addr_str
 }
 
-async fn spawn_websocket_delayed_terminal_upstream() -> String {
+async fn spawn_websocket_delayed_terminal_upstream() -> (String, tokio::sync::oneshot::Sender<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let addr_str = format!("http://{addr}");
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
 
     tokio::spawn(async move {
         if let Ok((stream, _)) = listener.accept().await
@@ -498,7 +499,7 @@ async fn spawn_websocket_delayed_terminal_upstream() -> String {
                 let _ = ws.send(Message::Text(event.to_string())).await;
             }
 
-            tokio::time::sleep(Duration::from_secs(2)).await;
+            release_rx.await.unwrap();
 
             let terminal_events = [
                 r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"message"}}"#,
@@ -510,7 +511,7 @@ async fn spawn_websocket_delayed_terminal_upstream() -> String {
         }
     });
 
-    addr_str
+    (addr_str, release_tx)
 }
 
 async fn spawn_websocket_error_upstream(message: &'static str) -> String {
@@ -1220,6 +1221,32 @@ async fn assert_usage_limit_response(response: Response) {
     assert_eq!(body["error"]["message"], "The usage limit has been reached");
 }
 
+fn stream_error_payload(bytes: &[u8]) -> Value {
+    let text = String::from_utf8_lossy(bytes);
+    assert!(text.starts_with("event: ping\n"), "{text}");
+    assert_eq!(text.matches("event: error\n").count(), 1, "{text}");
+    assert!(!text.contains("event: message_stop"), "{text}");
+    text.lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter_map(|data| serde_json::from_str::<Value>(data).ok())
+        .find(|payload| payload["type"] == "error")
+        .expect("stream must contain a structured error payload")
+}
+
+async fn assert_usage_limit_sse_response(response: Response) {
+    // After early headers, upstream failures use SSE. Buffered requests retain
+    // the HTTP header/status assertions in assert_usage_limit_response.
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "text/event-stream");
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let error = stream_error_payload(&bytes);
+    assert_eq!(error["error"]["type"], "rate_limit_error");
+    assert_eq!(
+        error["error"]["message"],
+        "The usage limit has been reached"
+    );
+}
+
 fn buffered_success_sse(text: &str) -> Vec<u8> {
     format!(
         concat!(
@@ -1262,8 +1289,8 @@ async fn smoke_codex_http_usage_limit_event_fast_fails_live_request() {
     }))
     .await;
 
+    assert_usage_limit_sse_response(response).await;
     assert_eq!(attempts.load(Ordering::SeqCst), 1);
-    assert_usage_limit_response(response).await;
 }
 
 #[allow(clippy::await_holding_lock)]
@@ -1309,8 +1336,8 @@ async fn smoke_codex_http_header_only_usage_limit_event_fast_fails_live_request(
     }))
     .await;
 
+    assert_usage_limit_sse_response(response).await;
     assert_eq!(attempts.load(Ordering::SeqCst), 1);
-    assert_usage_limit_response(response).await;
 }
 
 #[allow(clippy::await_holding_lock)]
@@ -1636,6 +1663,127 @@ async fn smoke_codex_http_server_compaction_fast_fails_usage_limit() {
     assert_eq!(attempts.load(Ordering::SeqCst), 1);
     assert_usage_limit_response(response).await;
     clear_all_compactions_for_tests();
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn smoke_streaming_websocket_headers_precede_blocked_output() {
+    let _guard = env_lock();
+    clear_codex_websocket_pool_for_tests();
+    let config = TempDir::new().unwrap();
+    write_auth(config.path(), "codex");
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let requests = Arc::new(AtomicUsize::new(0));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn({
+        let requests = requests.clone();
+        async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+            let request: Value =
+                serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap())
+                    .unwrap();
+            assert_eq!(request["type"], "response.create");
+            assert_eq!(request["model"], "gpt-6.1-sol");
+            requests.fetch_add(1, Ordering::SeqCst);
+            entered_tx.send(()).unwrap();
+            release_rx.await.unwrap();
+            for event in [
+                json!({"type":"response.output_item.added", "output_index":0,
+                    "item":{"type":"message", "id":"msg_delayed"}}),
+                json!({"type":"response.output_text.delta", "output_index":0,
+                    "delta":"delayed websocket output"}),
+                json!({"type":"response.completed", "response":{"id":"resp_delayed",
+                    "usage":{"input_tokens":5,"output_tokens":3}}}),
+            ] {
+                ws.send(Message::Text(event.to_string())).await.unwrap();
+            }
+        }
+    });
+    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", upstream);
+    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "websocket");
+    use futures_util::FutureExt;
+    let response = call_messages_body(json!({
+        "model":"gpt-6.1-sol", "max_tokens":64, "stream":true,
+        "messages":[{"role":"user","content":"hello"}]
+    }))
+    .now_or_never()
+    .expect("ordinary streaming headers must not wait for upstream output");
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body();
+    let first = body.frame().await.unwrap().unwrap().into_data().unwrap();
+    assert_eq!(
+        first.as_ref(),
+        b"event: ping\ndata: {\"type\":\"ping\"}\n\n"
+    );
+    tokio::select! {
+        entered = entered_rx => entered.unwrap(),
+        _ = body.frame() => panic!("no model output is available before release"),
+    }
+    release_tx.send(()).unwrap();
+    let rest = body.collect().await.unwrap().to_bytes();
+    let rest = String::from_utf8_lossy(&rest);
+    assert_eq!(rest.matches("delayed websocket output").count(), 1);
+    assert_eq!(rest.matches("event: message_stop").count(), 1);
+    assert!(!rest.contains("event: error"), "{rest}");
+    assert_eq!(requests.load(Ordering::SeqCst), 1);
+    server.await.unwrap();
+    clear_codex_websocket_pool_for_tests();
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn smoke_streaming_websocket_disconnect_cancels_blocked_output() {
+    let _guard = env_lock();
+    clear_codex_websocket_pool_for_tests();
+    let config = TempDir::new().unwrap();
+    write_auth(config.path(), "codex");
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (closed_tx, closed_rx) = tokio::sync::oneshot::channel();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+        let request = ws.next().await.unwrap().unwrap();
+        assert!(request.is_text());
+        entered_tx.send(()).unwrap();
+        while let Some(frame) = ws.next().await {
+            match frame {
+                Ok(Message::Close(_)) | Err(_) => break,
+                Ok(Message::Ping(payload)) => {
+                    let _ = ws.send(Message::Pong(payload)).await;
+                }
+                other => panic!("cancelled request must not be replayed: {other:?}"),
+            }
+        }
+        closed_tx.send(()).unwrap();
+    });
+    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", upstream);
+    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "websocket");
+    let response = call_messages_body(json!({
+        "model":"gpt-6.1-sol", "max_tokens":64, "stream":true,
+        "messages":[{"role":"user","content":"hello"}]
+    }))
+    .await;
+    let mut body = response.into_body();
+    let ping = body.frame().await.unwrap().unwrap().into_data().unwrap();
+    assert!(String::from_utf8_lossy(&ping).contains("event: ping"));
+    tokio::select! {
+        entered = entered_rx => entered.unwrap(),
+        _ = body.frame() => panic!("upstream output is deliberately blocked"),
+    }
+    drop(body);
+    tokio::time::timeout(Duration::from_secs(3), closed_rx)
+        .await
+        .expect("disconnect must close the pending upstream socket")
+        .unwrap();
+    server.await.unwrap();
+    clear_codex_websocket_pool_for_tests();
 }
 
 #[allow(clippy::await_holding_lock)]
@@ -2090,9 +2238,17 @@ async fn smoke_codex_http_stream_returns_before_upstream_completion() {
         .into_data()
         .unwrap();
     let first = String::from_utf8(first.to_vec()).unwrap();
-    assert!(first.contains("event: message_start"));
     assert!(first.contains("event: ping"));
-    assert!(first.contains("incremental ok"));
+    let mut early = Vec::new();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while !String::from_utf8_lossy(&early).contains("incremental ok") {
+            early.extend_from_slice(&body.frame().await.unwrap().unwrap().into_data().unwrap());
+        }
+    })
+    .await
+    .expect("text must stream before the terminal event is released");
+    assert!(String::from_utf8_lossy(&early).contains("event: message_start"));
+    assert!(!String::from_utf8_lossy(&early).contains("event: message_stop"));
 
     release.notify_one();
     let rest = axum::body::to_bytes(body, usize::MAX).await.unwrap();
@@ -2373,8 +2529,8 @@ async fn smoke_codex_http_usage_limit_status_fast_fails_live_request() {
     }))
     .await;
 
+    assert_usage_limit_sse_response(response).await;
     assert_eq!(attempts.load(Ordering::SeqCst), 1);
-    assert_usage_limit_response(response).await;
 }
 
 #[allow(clippy::await_holding_lock)]
@@ -2418,7 +2574,9 @@ async fn smoke_codex_http_bounds_initial_status_retries() {
     }))
     .await;
 
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(stream_error_payload(&bytes)["error"]["type"], "api_error");
     assert_eq!(attempts.load(Ordering::SeqCst), 4);
 }
 
@@ -2524,7 +2682,7 @@ async fn smoke_codex_http_stops_after_retry_limit() {
     }))
     .await;
 
-    assert_eq!(response.status().as_u16(), 529);
+    assert_eq!(response.status(), StatusCode::OK);
     let body = tokio::time::timeout(
         Duration::from_secs(2),
         axum::body::to_bytes(response.into_body(), usize::MAX),
@@ -2533,6 +2691,10 @@ async fn smoke_codex_http_stops_after_retry_limit() {
     .expect("exhausted stream must terminate")
     .unwrap();
     let text = String::from_utf8_lossy(&body);
+    assert_eq!(
+        stream_error_payload(&body)["error"]["type"],
+        "overloaded_error"
+    );
     assert_eq!(attempts.load(Ordering::SeqCst), 4, "stream body: {text}");
     assert!(
         text.contains("overloaded until retry limit"),
@@ -2570,12 +2732,14 @@ async fn smoke_codex_http_cancels_retry_backoff_when_request_drops() {
     let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
     let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
     let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "http");
-    let request = tokio::spawn(call_messages_body(json!({
+    let response = call_messages_body(json!({
         "model": "gpt-5.5",
         "max_tokens": 64,
         "stream": true,
         "messages": [{"role":"user","content":"hello"}]
-    })));
+    }))
+    .await;
+    let request = tokio::spawn(async move { response.into_body().collect().await });
     tokio::time::timeout(Duration::from_secs(5), async {
         while attempts.load(Ordering::SeqCst) == 0 {
             tokio::task::yield_now().await;
@@ -2743,9 +2907,9 @@ async fn smoke_codex_auto_fallback_usage_limit_fast_fails_live_request() {
     }))
     .await;
 
+    assert_usage_limit_sse_response(response).await;
     assert_eq!(websocket_attempts.load(Ordering::SeqCst), 1);
     assert_eq!(http_attempts.load(Ordering::SeqCst), 1);
-    assert_usage_limit_response(response).await;
     clear_codex_websocket_pool_for_tests();
 }
 
@@ -2824,8 +2988,8 @@ async fn smoke_codex_websocket_usage_limit_fast_fails_request() {
     }))
     .await;
 
+    assert_usage_limit_sse_response(response).await;
     assert_eq!(attempts.load(Ordering::SeqCst), 1);
-    assert_usage_limit_response(response).await;
     clear_codex_websocket_pool_for_tests();
 }
 
@@ -2903,7 +3067,7 @@ async fn smoke_codex_websocket_stream_returns_delta_before_terminal() {
     write_auth(config.path(), "codex");
     clear_codex_websocket_pool_for_tests();
 
-    let upstream = spawn_websocket_delayed_terminal_upstream().await;
+    let (upstream, release) = spawn_websocket_delayed_terminal_upstream().await;
 
     let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
     let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
@@ -2924,7 +3088,7 @@ async fn smoke_codex_websocket_stream_returns_delta_before_terminal() {
 
     let mut body = response.into_body();
     let mut collected = Vec::new();
-    let read = tokio::time::timeout(Duration::from_millis(500), async {
+    let read = tokio::time::timeout(Duration::from_secs(3), async {
         while !String::from_utf8_lossy(&collected).contains("text_delta") {
             let Some(frame) = body.frame().await else {
                 break;
@@ -2947,6 +3111,9 @@ async fn smoke_codex_websocket_stream_returns_delta_before_terminal() {
         !text.contains("message_stop"),
         "stream finished too early: {text}"
     );
+    release.send(()).unwrap();
+    let rest = body.collect().await.unwrap().to_bytes();
+    assert!(String::from_utf8_lossy(&rest).contains("event: message_stop"));
 }
 
 #[allow(clippy::await_holding_lock)]
@@ -2977,11 +3144,11 @@ async fn smoke_codex_websocket_context_window_error_requests_compaction() {
 
     assert_eq!(
         status,
-        StatusCode::PAYLOAD_TOO_LARGE,
+        StatusCode::OK,
         "response body: {}",
         String::from_utf8_lossy(&body)
     );
-    let value: Value = serde_json::from_slice(&body).unwrap();
+    let value = stream_error_payload(&body);
     assert_eq!(value["type"], "error");
     assert_eq!(value["error"]["type"], "request_too_large");
     assert_eq!(value["error"]["message"], "input exceeds context window");
@@ -3304,7 +3471,6 @@ async fn smoke_codex_websocket_empty_completions_exhaust_to_service_unavailable(
         "messages": [{"role":"user","content":"one"}]
     }))
     .await;
-    assert_eq!(response.headers().get("x-should-retry").unwrap(), "false");
     let status = response.status();
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
@@ -3313,9 +3479,10 @@ async fn smoke_codex_websocket_empty_completions_exhaust_to_service_unavailable(
 
     assert_eq!(
         status,
-        StatusCode::SERVICE_UNAVAILABLE,
+        StatusCode::OK,
         "exhausted empty completions must surface an explicit error: {body_text}"
     );
+    assert_eq!(stream_error_payload(&body)["error"]["type"], "api_error");
     assert!(
         body_text.contains("Codex completed without producing output"),
         "unexpected exhaustion body: {body_text}"

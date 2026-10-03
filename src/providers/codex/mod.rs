@@ -351,36 +351,54 @@ impl CodexProvider {
         }
         if want_stream {
             let stream_request = translated.clone();
-            let response = live_stream_response(
-                client,
-                message_id,
-                model,
-                ctx,
-                stream_request,
-                continuation,
-                LiveStreamCompaction {
-                    compact_boundary,
-                    attempt: compaction_attempt,
-                },
-                configured_transport,
-            )
-            .await;
-            log.info(
-                "codex_upstream_response_ready",
-                Some(serde_json::Map::from_iter([
-                    ("reqId".to_string(), serde_json::json!(&req_id)),
-                    ("transport".to_string(), serde_json::json!(transport)),
-                    (
-                        "status".to_string(),
-                        serde_json::json!(response.status().as_u16()),
-                    ),
-                    (
-                        "ms".to_string(),
-                        serde_json::json!(upstream_started_at.elapsed().as_millis()),
-                    ),
-                ])),
+            let stream_model = model.to_owned();
+            // Own reserved state even if the client disconnects immediately
+            // after the initial ping, before preparation is first polled.
+            let mut preparation_cleanup = LiveRequestStateCleanup::new(
+                continuation.clone(),
+                ctx.session_id.clone(),
+                compaction_attempt,
             );
-            return response;
+            let preparation = async move {
+                let response = live_stream_response(
+                    client,
+                    message_id,
+                    &stream_model,
+                    ctx,
+                    stream_request,
+                    continuation,
+                    LiveStreamCompaction {
+                        compact_boundary,
+                        attempt: compaction_attempt,
+                    },
+                    configured_transport,
+                )
+                .await;
+                preparation_cleanup.disarm();
+                log.info(
+                    "codex_upstream_response_ready",
+                    Some(serde_json::Map::from_iter([
+                        ("reqId".to_string(), serde_json::json!(&req_id)),
+                        ("transport".to_string(), serde_json::json!(transport)),
+                        (
+                            "status".to_string(),
+                            serde_json::json!(response.status().as_u16()),
+                        ),
+                        (
+                            "ms".to_string(),
+                            serde_json::json!(upstream_started_at.elapsed().as_millis()),
+                        ),
+                    ])),
+                );
+                response
+            };
+            return if compact_boundary {
+                // Compact requests already own a preparation stream around
+                // native compaction; do not introduce a second heartbeat.
+                preparation.await
+            } else {
+                pending_stream_response(preparation).await
+            };
         }
 
         let request_continuation = continuation.clone();
@@ -587,7 +605,7 @@ impl Provider for CodexProvider {
             let provider = Self {
                 client: self.client.clone(),
             };
-            return pending_compaction_response(async move {
+            return pending_stream_response(async move {
                 provider
                     .handle_messages_inner(body, ctx, conversation_identity)
                     .await
@@ -1448,14 +1466,14 @@ fn single_live_stream_response(chunk: Vec<u8>) -> Response {
     }))
 }
 
-async fn pending_compaction_response(
+async fn pending_stream_response(
     preparation: impl std::future::Future<Output = Response> + Send + 'static,
 ) -> Response {
     use futures_util::StreamExt;
     use http_body_util::BodyExt;
 
     // Preparation lives inside the response body. Dropping the body cancels it
-    // directly rather than leaving a detached compaction worker behind.
+    // directly rather than leaving a detached upstream worker behind.
     let preparation =
         async move {
             let response = preparation.await;
@@ -2264,7 +2282,7 @@ mod tests {
         };
         let response = tokio::select! {
             biased;
-            response = pending_compaction_response(preparation) => Some(response),
+            response = pending_stream_response(preparation) => Some(response),
             _ = &mut entered_rx => None,
         };
         assert!(
@@ -2293,7 +2311,7 @@ mod tests {
 
     #[tokio::test]
     async fn compact_preparation_forwards_json_error_as_sse_error() {
-        let response = pending_compaction_response(async {
+        let response = pending_stream_response(async {
             json_error(
                 StatusCode::TOO_MANY_REQUESTS,
                 "rate_limit_error",
@@ -2320,7 +2338,7 @@ mod tests {
                 let _ = self.0.take().unwrap().send(());
             }
         }
-        let response = pending_compaction_response(async move {
+        let response = pending_stream_response(async move {
             let _drop = NotifyDrop(Some(dropped_tx));
             entered_tx.send(()).unwrap();
             std::future::pending::<Response>().await
@@ -2332,6 +2350,27 @@ mod tests {
         entered_rx.await.unwrap();
         drop(body);
         dropped_rx.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn ordinary_preparation_unpolled_disconnect_releases_owned_state() {
+        let _registry_guard = continuation::lock_continuation_registry_for_async_tests().await;
+        let session = format!("unpolled-preparation-{}", uuid::Uuid::new_v4());
+        let owner = ConversationIdentity::Main(session.clone());
+        let request = live_test_request("one");
+        let reservation = continuation_candidate_for_owner(Some(&owner), &request, true);
+        let attempt = begin_compaction(&session, &request.model);
+        let cleanup =
+            LiveRequestStateCleanup::new(reservation.clone(), Some(session.clone()), Some(attempt));
+        let preparation = async move {
+            let _cleanup = cleanup;
+            std::future::pending::<Response>().await
+        };
+        assert!(continuation::is_current_turn_for_owner(&reservation));
+        drop(preparation);
+        assert!(!continuation::is_current_turn_for_owner(&reservation));
+        assert!(!store_compaction(&session, attempt, vec![]));
+        compaction::clear_compaction(&session);
     }
 
     #[test]
