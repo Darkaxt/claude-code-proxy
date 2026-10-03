@@ -40,14 +40,16 @@ while awaiting preparation.
    `cargo test --locked --all -- --test-threads=1` run passed on the current
    stream1.catalog1 source. Formatting and whitespace checks passed. Existing
    Windows-only unused-parameter warnings are unchanged and outside this fix.
-2. ACTIVE: R6 release build and isolated candidate verification, commit,
-   notification, confirmed-pause deployment and live verification. A staged
-   candidate is not evidence of deployment or Navic recovery.
+2. COMPLETE: R6 release build, isolated candidate verification, implementation
+   commit f8eb4f5, confirmed-pause deployment and live verification passed.
+   Installed binary and preserved configuration hashes were rechecked after
+   transactional cleanup; healthz remains healthy. Recovery deliverables remain
+   available, and all reviewed cleanup tickets reached applied without errors.
 
 Blockers: none. Deferrals: none.
 The user confirmed all threads safely paused on 2026-10-03; monitor verified
-zero active requests. Recheck immediately before replacement. No additional
-pause confirmation is required.
+zero active requests, rechecked immediately before replacement. No additional
+pause confirmation was required.
 
 Candidate verification: Windows release 0.1.42-pr158.stream1.catalog1, SHA-256
 477571223C324D7E18846FEE04B0B7CDA8658C2BF41943B8EA3F139F8D8BA601.
@@ -58,7 +60,34 @@ headers in 12 ms and first ping in 13 ms, text and one message_stop in 13494 ms.
 Health/catalog passed; both requests completed without error. Candidate process
 was stopped only after its requests completed. Configuration, Claude settings,
 and manual catalog SHA-256 hashes are unchanged.
+
+Live deployment on 2026-10-03: zero active requests rechecked immediately before
+stopping only the owned proxy child and supervisor (92156/78108). Staged candidate and
+prior binary/build-info retained under
+`C:/Users/darka/AppData/Local/Programs/claude-code-proxy/staging/v0.1.42-pr158.stream1.catalog1/`.
+Installed version and SHA-256 match the tested candidate. Existing hidden launcher
+started owned process 29200 under supervisor 48900; startup scripts are unchanged.
+Real ordinary inference returned HTTP 200 headers in 152 ms, initial ping in
+165 ms, text and one message_stop in 3517 ms; log confirms transport websocket.
+Native compaction returned headers in 11 ms, initial ping in 12 ms, text and one
+message_stop in 17839 ms. Health/catalog passed, both monitor entries completed
+without error, and config/settings/manual-catalog hashes match pre-deployment.
+The user was notified that paused threads may now continue. This verifies the
+gateway fix and deployment, not completion of Navic's original implementation.
 Generated expendable outputs: Cargo target outputs created by this task and
 isolated verification artifacts. The candidate/rollback files are intentional
 recovery deliverables; existing source, cached artifacts, auth and user files
 are preserved. Cleanup uses a scoped transactional snapshot of target.
+
+Cleanup reconciliation: transaction 12de33916d7128cda91520c449b6f1bf deleted
+the ordinary newly generated build outputs (7,621,232,322 reported file bytes).
+It initially preserved Cargo hard-linked names, leaving nonempty directories.
+The exact release folder and four newly generated incremental-cache directories
+were independently attributed to this task and reviewed in follow-up transactions
+3703f73468d3fabdc3943a42b4531e6a and 54bfa824d54917b89a4ea3a430183190.
+Only those registered names were removed with explicit hard-link handling; other
+link names, pre-existing cache, source, installed files and rollback remain intact.
+Both follow-up tickets and the original retried ticket are applied with no errors
+or remaining candidate members. Reported file-byte totals for hard links are not
+a measurement of physically reclaimed disk space. Verification evidence and the
+candidate/rollback files remain intentional diagnostic/recovery outputs.
