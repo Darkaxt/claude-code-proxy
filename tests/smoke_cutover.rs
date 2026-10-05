@@ -1655,7 +1655,8 @@ async fn smoke_codex_http_server_compaction_fast_fails_usage_limit() {
             {"role":"user","content":[
                 {"type":"tool_result","tool_use_id":"tool-1","content":"result"},
                 {"type":"text","text":"CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.\n\nYour task is to create a detailed summary of the conversation so far, paying close attention to the user's explicit requests."}
-            ]}
+            ]},
+            {"role":"assistant","content":"context appended after the internal compact prompt"}
         ]
     }))
     .await;
@@ -1905,13 +1906,15 @@ async fn smoke_codex_http_server_compaction_replays_native_history() {
         "model": "gpt-5.6-sol",
         "max_tokens": 64,
         "system": "You are Claude Code.",
+        "tools": [{"name":"Read","description":"read source","input_schema":{"type":"object","properties":{}}}],
         "messages": [
             {"role":"user","content":"old conversation"},
             {"role":"assistant","content":[{"type":"tool_use","id":"tool-1","name":"Read","input":{}}]},
             {"role":"user","content":[
                 {"type":"tool_result","tool_use_id":"tool-1","content":"result"},
                 {"type":"text","text":"CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.\n\nYour task is to create a detailed summary of the conversation so far, paying close attention to the user's explicit requests."}
-            ]}
+            ]},
+            {"role":"assistant","content":"context appended after the internal compact prompt"}
         ]
     }))
     .await;
@@ -1922,7 +1925,7 @@ async fn smoke_codex_http_server_compaction_replays_native_history() {
         "max_tokens": 64,
         "system": "current instructions",
         "messages": [
-            {"role":"user","content":"<summary>portable summary with enough detail to anchor the compacted conversation</summary>"},
+            {"role":"user","content":"This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\nSummary:\nportable summary with enough detail to anchor the compacted conversation"},
             {"role":"user","content":"continue"}
         ]
     }))
@@ -1954,16 +1957,85 @@ async fn smoke_codex_http_server_compaction_replays_native_history() {
             .to_string()
             .contains("Your task is to create a detailed summary")
     );
+    assert_eq!(requests[1]["tool_choice"], "none");
+    assert!(requests[1]["tools"].is_null());
+    assert!(
+        !requests[1]["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["type"] == "additional_tools")
+    );
     assert!(!requests[1].to_string().contains("opaque-history"));
+    assert!(
+        requests[1]
+            .to_string()
+            .contains("internal context-maintenance request")
+    );
     let replay = requests[2]["input"].as_array().unwrap();
     assert!(requests[2].get("client_metadata").is_some());
     assert!(requests[2].to_string().contains("current instructions"));
+    assert!(
+        requests[2]
+            .to_string()
+            .contains("model-generated historical context")
+    );
+    assert!(
+        !requests[2]
+            .to_string()
+            .contains("CRITICAL: Respond with TEXT ONLY")
+    );
     let compaction = replay
         .iter()
         .find(|item| item["type"] == "compaction")
         .unwrap();
     assert_eq!(compaction["encrypted_content"], "opaque-history");
     assert!(replay.iter().any(|item| item["role"] == "user"));
+    clear_all_compactions_for_tests();
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn smoke_codex_compaction_provenance_portable_fallback_keeps_pause() {
+    let _guard = env_lock();
+    clear_all_compactions_for_tests();
+    let config = TempDir::new().unwrap();
+    write_auth(config.path(), "codex");
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let upstream = spawn_http_upstream({
+        let captured = captured.clone();
+        move |body: Value| {
+            captured.lock().unwrap().push(body);
+            buffered_success_sse("Paused as genuinely requested.")
+        }
+    })
+    .await;
+    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
+    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "http");
+    let _compaction_env = EnvGuard::set("CCP_CODEX_SERVER_COMPACTION", "0");
+    let summary = "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\nSummary:\nCurrent genuine request: TEXT ONLY detailed summary; no tools.\nPending implementation: inspect the feature.";
+    let pause = "Pause implementation now and only tell me its status. Do not call tools.";
+    let response = call_messages_body(json!({
+        "model":"gpt-5.6-sol", "max_tokens":64, "system":"current instructions",
+        "messages":[{"role":"user","content":summary},{"role":"user","content":pause}],
+        "tools":[{"name":"InspectImplementation","description":"inspect","input_schema":{"type":"object","properties":{}}}]
+    })).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let requests = captured.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    let sent = requests[0].to_string();
+    assert!(sent.contains("model-generated historical context"));
+    assert!(sent.contains("genuine user pause"));
+    assert!(sent.contains("InspectImplementation"));
+    assert!(!sent.contains("compaction_trigger"));
+    let input = requests[0]["input"].as_array().unwrap();
+    assert!(
+        input
+            .iter()
+            .any(|item| item["role"] == "user" && item["content"][0]["text"] == summary)
+    );
+    assert_eq!(input.last().unwrap()["content"][0]["text"], pause);
     clear_all_compactions_for_tests();
 }
 

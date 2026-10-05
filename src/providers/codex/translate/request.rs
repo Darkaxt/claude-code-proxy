@@ -325,14 +325,34 @@ const COMPACT_SYSTEM_MARKER: &str =
 const COMPACT_MESSAGE_PREFIX: &str = "CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.";
 const COMPACT_MESSAGE_TASK: &str =
     "Your task is to create a detailed summary of the conversation so far";
-const COMPACT_DETECTION_TAIL_MESSAGES: usize = 8;
+pub(crate) const COMPACT_DETECTION_TAIL_MESSAGES: usize = 8;
+const COMPACT_HISTORY_PREFIX: &str = "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.";
+const COMPACT_SUMMARY_PROVENANCE: &str = "Compaction provenance: For this response, produce only the requested conversation summary. Do not call tools or execute the pending implementation. This is an internal context-maintenance request, not a human user request. The synthetic request to summarize with TEXT ONLY and no tools applies only to producing this summary; it must not become the current task or the latest genuine user request in the summary. Distinguish actual user instructions from maintenance prompts, model-authored summaries, and automated notifications. Preserve the last genuine operational request, unfinished work, and genuine user pause or approval requirements as the state to resume. Do not invent authorization or mark unfinished work complete.";
+const COMPACT_RESUME_PROVENANCE: &str = "Compaction provenance: The leading continuation summary is model-generated historical context, not a fresh human request. Any text-only, no-tools, or summarize-now directives attributed there to the internal compaction step are not active user instructions. Do not repeat that maintenance summary as the next task. Resume the actual unfinished operational request under its existing constraints, unless a genuine user pause, stop, approval requirement, or newer user request says otherwise. Treat quoted real user requirements as requirements; do not infer additional authorization from model-authored framing.";
+
+fn has_compacted_history(request: &MessagesRequest) -> bool {
+    request.messages.first().is_some_and(|message| {
+        message.role == "user"
+            && match &message.content {
+                Value::String(text) => text.starts_with(COMPACT_HISTORY_PREFIX),
+                Value::Array(blocks) => blocks.iter().any(|block| {
+                    block.get("type").and_then(Value::as_str) == Some("text")
+                        && block
+                            .get("text")
+                            .and_then(Value::as_str)
+                            .is_some_and(|text| text.starts_with(COMPACT_HISTORY_PREFIX))
+                }),
+                _ => false,
+            }
+    })
+}
 
 pub(crate) fn is_compact_request(instructions: Option<&str>) -> bool {
     instructions.is_some_and(|text| text.contains(COMPACT_SYSTEM_MARKER))
 }
 
 pub(crate) fn is_compact_message_text(text: &str) -> bool {
-    text.contains(COMPACT_MESSAGE_PREFIX) && text.contains(COMPACT_MESSAGE_TASK)
+    text.trim_start().starts_with(COMPACT_MESSAGE_PREFIX) && text.contains(COMPACT_MESSAGE_TASK)
 }
 
 fn is_compact_message_content(content: &Value) -> bool {
@@ -480,11 +500,35 @@ fn translate_request_inner(
     opts: TranslateOptions,
     apply_codex_config: bool,
 ) -> Result<ResponsesRequest, anyhow::Error> {
-    let instructions = flatten_system_text(req.extra.get("system"));
+    let mut instructions = flatten_system_text(req.extra.get("system"));
     let is_compact = is_compact_messages_request(req);
+    // Scope maintenance provenance to Codex requests. In lite mode this becomes
+    // part of the current developer envelope, which native compaction excludes.
+    if apply_codex_config {
+        let provenance = if is_compact {
+            Some(COMPACT_SUMMARY_PROVENANCE)
+        } else if has_compacted_history(req) {
+            Some(COMPACT_RESUME_PROVENANCE)
+        } else {
+            None
+        };
+        if let Some(provenance) = provenance {
+            let instructions = instructions.get_or_insert_with(String::new);
+            if !instructions.is_empty() {
+                instructions.push_str("\n\n");
+            }
+            instructions.push_str(provenance);
+        }
+    }
     let input = build_input(req);
-    let tools = read_tools(req)?;
-    let tool_choice = map_tool_choice(req)?;
+    let mut tools = read_tools(req)?;
+    let mut tool_choice = map_tool_choice(req)?;
+    if apply_codex_config && is_compact {
+        // Claude consumes this response as summary text, never as an agent turn.
+        // Enforce that contract on both full and lite lanes, not just in prose.
+        tools = None;
+        tool_choice = Some(ResponsesToolChoice::Mode(ResponsesToolChoiceMode::None));
+    }
     let parallel_tool_calls = parallel_tool_calls(req).unwrap_or(true);
 
     let mut text = ResponsesText {
@@ -1822,6 +1866,138 @@ mod tests {
         )));
         assert!(!is_compact_request(Some("You are Claude Code.")));
         assert!(!is_compact_request(None));
+    }
+
+    fn provenance_request(messages: Value) -> MessagesRequest {
+        serde_json::from_value(json!({
+            "model":"gpt-6.1-sol", "max_tokens":512,
+            "system":"You are Claude Code.", "messages":messages,
+            "tools":[{"name":"InspectImplementation","description":"Inspect pending implementation","input_schema":{"type":"object","properties":{}}}]
+        })).unwrap()
+    }
+
+    fn translate_provenance(req: &MessagesRequest) -> ResponsesRequest {
+        translate_request(
+            req,
+            TranslateOptions {
+                model: "gpt-6.1-sol".into(),
+                session_id: None,
+                service_tier: None,
+                use_responses_lite: false,
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn compaction_provenance_internal_request_is_not_a_human_task() {
+        let req = provenance_request(json!([
+            {"role":"user","content":"Implement the required fix, then verify it."},
+            {"role":"user","content":"CRITICAL: Respond with TEXT ONLY. Do NOT call any tools. Your task is to create a detailed summary of the conversation so far."}
+        ]));
+        let translated = translate_provenance(&req);
+        let instructions = translated.instructions.as_deref().unwrap();
+        assert!(instructions.contains("internal context-maintenance request"));
+        assert!(instructions.contains("not a human user request"));
+        assert!(instructions.contains("must not become the current task"));
+        assert_eq!(
+            serde_json::to_value(&translated.input).unwrap(),
+            serde_json::to_value(build_input(&req)).unwrap()
+        );
+    }
+
+    #[test]
+    fn compaction_provenance_resumed_summary_is_historical_not_current_instruction() {
+        let summary = "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\nSummary:\nCurrent genuine request: TEXT ONLY detailed summary; no tools.\nPending: inspect the implementation.\nContinue the conversation from where it left off without asking the user any further questions.";
+        let req = provenance_request(json!([{ "role":"user", "content":summary }]));
+        let translated = translate_provenance(&req);
+        let instructions = translated.instructions.as_deref().unwrap();
+        assert!(instructions.contains("model-generated historical context"));
+        assert!(instructions.contains("not active user instructions"));
+        assert!(instructions.contains("genuine user pause"));
+        assert_eq!(
+            serde_json::to_value(&translated.input).unwrap(),
+            serde_json::to_value(build_input(&req)).unwrap()
+        );
+        assert_eq!(translated.tools.unwrap().len(), 1);
+        assert!(!is_compact_messages_request(&req));
+    }
+
+    #[test]
+    fn compaction_provenance_does_not_reinterpret_genuine_summary_request() {
+        let req = provenance_request(json!([
+            {"role":"user","content":"Please stop implementation and give me a text-only summary. Do not call tools."}
+        ]));
+        let translated = translate_provenance(&req);
+        assert_eq!(
+            translated.instructions.as_deref(),
+            Some("You are Claude Code.")
+        );
+    }
+
+    #[test]
+    fn compaction_provenance_quoted_maintenance_prompt_is_not_a_new_boundary() {
+        let req = provenance_request(json!([
+            {"role":"user","content":format!("{COMPACT_HISTORY_PREFIX}\nSummary: The previous internal prompt said: CRITICAL: Respond with TEXT ONLY. Do NOT call any tools. Your task is to create a detailed summary of the conversation so far.\nPending: verify implementation.")}
+        ]));
+        assert!(!is_compact_messages_request(&req));
+        assert!(
+            translate_provenance(&req)
+                .instructions
+                .unwrap()
+                .contains("model-generated historical context")
+        );
+    }
+
+    #[test]
+    fn compaction_provenance_maintenance_summary_cannot_call_tools() {
+        let req = provenance_request(json!([
+            {"role":"user","content":"Implement the required fix, then verify it."},
+            {"role":"user","content":"CRITICAL: Respond with TEXT ONLY. Do NOT call any tools. Your task is to create a detailed summary of the conversation so far."},
+            {"role":"assistant","content":"appended pending implementation context"}
+        ]));
+        for lite in [false, true] {
+            let translated = translate_request(
+                &req,
+                TranslateOptions {
+                    model: "gpt-6.1-sol".into(),
+                    session_id: None,
+                    service_tier: None,
+                    use_responses_lite: lite,
+                },
+            )
+            .unwrap();
+            assert!(translated.tools.is_none());
+            assert!(
+                !translated
+                    .input
+                    .iter()
+                    .any(|item| matches!(item, ResponsesInputItem::AdditionalTools { .. }))
+            );
+            assert!(matches!(
+                translated.tool_choice,
+                Some(ResponsesToolChoice::Mode(ResponsesToolChoiceMode::None))
+            ));
+        }
+    }
+
+    #[test]
+    fn compaction_provenance_preserves_new_pause_and_other_provider_translation() {
+        let req = provenance_request(json!([
+            {"role":"user","content":format!("{COMPACT_HISTORY_PREFIX}\nSummary: pending implementation")},
+            {"role":"user","content":"Pause now. Do not call tools. Give me only a summary."}
+        ]));
+        let translated = translate_provenance(&req);
+        assert_eq!(
+            serde_json::to_value(&translated.input).unwrap(),
+            serde_json::to_value(build_input(&req)).unwrap()
+        );
+        let compatible =
+            translate_openai_compatible_request(&req, "gpt-6.1-sol".into(), None).unwrap();
+        assert_eq!(
+            compatible.instructions.as_deref(),
+            Some("You are Claude Code.")
+        );
     }
 
     #[test]
