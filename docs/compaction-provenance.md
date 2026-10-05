@@ -3,6 +3,11 @@
 Authorization: user requested a fix for Navic's post-compaction self-summary
 stops. Implement, verify, commit and prepare a binary; do not replace the running
 proxy or change Claude settings, OAuth, models, WebSocket or timeout settings.
+Deployment authorization added October 6: after being asked to pause ClaudeGPT
+and authorize deployment, the user confirmed "everything looks paused". Replace
+the verified binary and restart the existing hidden supervisor, preserving all
+configuration and user sessions. Verify gateway health and a synthetic upstream
+request; live Navic recovery remains a separate observation after user resumes.
 
 Evidence: the October 5 Navic auto-compaction summaries label Claude's synthetic
 text-only/no-tools summary task as the current genuine user request. Subsequent
@@ -93,3 +98,35 @@ satisfied. No claim of deployed/live-session recovery is made.
 
 Blockers: none. Tracked deferrals: none. Unit/payload verification does not prove
 model behavior; isolated model verification does not prove live Navic recovery.
+
+## Authorized deployment
+
+4. COMPLETE — install the verified candidate and restart the existing supervisor.
+   Acceptance: monitor reports no active requests before shutdown; preserve a
+   hash-verified prior binary and metadata as the explicit rollback path; stop
+   only the existing supervisor's owned child and wait for confirmed exit;
+   installed candidate hash/version match the verified artifact; restart hidden
+   through the existing launcher; port 8317 health and one synthetic upstream
+   continuation succeed; original configuration, Claude settings, OAuth and manual
+   model catalog remain unchanged. Do not resume or terminate user Claude sessions.
+   Rollback if the replacement cannot pass gateway verification: stop the owned
+   replacement through the supervisor, restore the hash-verified prior binary and
+   metadata, restart the same launcher and verify gateway health before reporting
+   a failed deployment.
+   Verified October 6, 00:39 CEST: monitor active requests zero immediately before
+   shutdown. Supervisor 48900 and its owned proxy 29200 exited after the named
+   stop event; listener disappeared. Prior binary and metadata were copied to the
+   candidate staging directory and rollback binary hash verified. Installed
+   version/hash match the candidate. Existing hidden launcher started supervisor
+   98608 and proxy 67216; only that proxy owns the 127.0.0.1:8317 listener.
+   Health returns ok. Real GPT-6.1 Sol high synthetic compacted-history continuation
+   returns HTTP 200, tool_use InspectImplementation instead of another summary;
+   monitor reports completed, no error, and zero active requests afterward. No
+   inspection tool executes and no real user session resumes. Proxy configuration,
+   Claude settings, OAuth and manual model catalog hashes remain unchanged.
+   Deployment metadata records verified binary, source and rollback paths.
+   The foreground deployment command's Start-Process -Wait also waited for the
+   persistent supervisor descendant. Only that task-owned waiting command host
+   (41160) was terminated after verifying service readiness; supervisor and proxy
+   survived and health was rechecked. No user Claude process was terminated.
+   Stage acceptance criteria satisfied. Live Navic recovery awaits user resume.
