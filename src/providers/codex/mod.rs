@@ -111,6 +111,7 @@ impl CodexProvider {
     ) -> Response {
         let message_id = format!("msg_{}", uuid::Uuid::new_v4().to_string().replace('-', ""));
         let want_stream = body.stream;
+        let allow_silent_completion = has_acknowledged_noop_wakeup_tail(&body);
         let model = body.model.as_deref().unwrap_or("gpt-6-sol");
 
         let mut resolved =
@@ -372,6 +373,7 @@ impl CodexProvider {
                         attempt: compaction_attempt,
                     },
                     configured_transport,
+                    allow_silent_completion,
                 )
                 .await;
                 preparation_cleanup.disarm();
@@ -445,7 +447,7 @@ impl CodexProvider {
                     return map_codex_error_to_response(&e);
                 }
             };
-            if !is_empty_codex_success_completion(&response.body) {
+            if allow_silent_completion || !is_empty_codex_success_completion(&response.body) {
                 break response;
             }
             // A successful terminal event with no output would translate into
@@ -783,6 +785,7 @@ async fn live_stream_response(
     continuation: ContinuationReservation,
     compaction: LiveStreamCompaction,
     transport: config::CodexTransport,
+    allow_silent_completion: bool,
 ) -> Response {
     let model = model.to_string();
     let request_continuation = continuation.clone();
@@ -958,6 +961,7 @@ async fn live_stream_response(
             request_continuation.clone(),
             request_body.clone(),
             compaction,
+            allow_silent_completion,
         );
         let started = match await_empty_retry(
             start_stream,
@@ -1232,6 +1236,7 @@ async fn live_stream_response_once(
     request_continuation: ContinuationReservation,
     request_body: translate::request::ResponsesRequest,
     compaction: LiveStreamCompaction,
+    allow_silent_completion: bool,
 ) -> LiveStreamStart {
     let estimated_input_tokens = count_translated_tokens(&request_body);
     let mut translator = LiveStreamTranslator::with_estimated_input_tokens(
@@ -1313,6 +1318,7 @@ async fn live_stream_response_once(
         if terminal
             && is_codex_success_terminal_event(&payload)
             && !translator.has_semantic_output()
+            && !allow_silent_completion
         {
             // Record shape only; never log prompt or generated content by default.
             create_logger("codex").warn(
@@ -1871,6 +1877,68 @@ fn empty_buffered_completion_error() -> client::CodexError {
             _ => client::CodexErrorOrigin::BufferedWebSocket,
         },
     }
+}
+
+/// A no-op wakeup explicitly asks the harness to wait without another answer.
+/// Inspect the original tool/result pair, not translated or historical input:
+/// arbitrary tool tails, failed calls, and additional user work are not silent.
+fn has_acknowledged_noop_wakeup_tail(body: &MessagesRequest) -> bool {
+    let Some([call_message, result_message]) = body.messages.last_chunk::<2>() else {
+        return false;
+    };
+    if call_message.role != "assistant" || result_message.role != "user" {
+        return false;
+    }
+    let Some(call_blocks) = call_message.content.as_array() else {
+        return false;
+    };
+    let Some(result_blocks) = result_message.content.as_array() else {
+        return false;
+    };
+    let [result] = result_blocks.as_slice() else {
+        return false;
+    };
+    if result["type"] != "tool_result"
+        || !matches!(
+            result.get("is_error"),
+            None | Some(serde_json::Value::Bool(false))
+        )
+    {
+        return false;
+    }
+    let mut calls = call_blocks
+        .iter()
+        .filter(|block| block["type"] == "tool_use");
+    let Some(call) = calls.next() else {
+        return false;
+    };
+    if calls.next().is_some()
+        || call["name"] != "ScheduleWakeup"
+        || call
+            .pointer("/input/noop")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+    {
+        return false;
+    }
+    let Some(call_id) = call["id"].as_str().filter(|id| !id.is_empty()) else {
+        return false;
+    };
+    if result["tool_use_id"].as_str() != Some(call_id) {
+        return false;
+    }
+    let acknowledgement = match &result["content"] {
+        serde_json::Value::String(text) => Some(text.as_str()),
+        serde_json::Value::Array(blocks) => match blocks.as_slice() {
+            [block] if block["type"] == "text" => block["text"].as_str(),
+            _ => None,
+        },
+        _ => None,
+    };
+    acknowledgement.is_some_and(|text| {
+        text.starts_with("Next wakeup scheduled for ")
+            && text.contains("Nothing more to do this turn")
+    })
 }
 
 /// True when the buffered upstream body ended in a successful terminal event
@@ -2573,6 +2641,111 @@ mod tests {
         assert!(is_empty_codex_success_completion(&body));
     }
 
+    fn noop_wakeup_tail() -> serde_json::Value {
+        serde_json::json!({"messages":[
+            {"role":"assistant","content":[{
+                "type":"tool_use","id":"wake_1","name":"ScheduleWakeup",
+                "input":{"noop":true}
+            }]},
+            {"role":"user","content":[{
+                "type":"tool_result","tool_use_id":"wake_1",
+                "is_error":false,
+                "content":"Next wakeup scheduled for 16:06:00. Nothing more to do this turn."
+            }]}
+        ]})
+    }
+
+    #[test]
+    fn noop_wakeup_accepts_only_an_acknowledged_successful_pair() {
+        let mut body = noop_wakeup_tail();
+        let permits = |body: serde_json::Value| {
+            has_acknowledged_noop_wakeup_tail(&serde_json::from_value(body).unwrap())
+        };
+        assert!(permits(body.clone()));
+        body["messages"][1]["content"][0]["is_error"] = serde_json::json!(false);
+        body["messages"][1]["content"][0]["content"] = serde_json::json!([{
+            "type":"text", "text":"Next wakeup scheduled for 16:06:00. Nothing more to do this turn."
+        }]);
+        assert!(permits(body));
+        for (name, pointer, value) in [
+            (
+                "failed result",
+                "/messages/1/content/0/is_error",
+                serde_json::json!(true),
+            ),
+            (
+                "malformed error flag",
+                "/messages/1/content/0/is_error",
+                serde_json::json!("false"),
+            ),
+            (
+                "wrong call ID",
+                "/messages/1/content/0/tool_use_id",
+                serde_json::json!("other"),
+            ),
+            (
+                "empty call ID",
+                "/messages/0/content/0/id",
+                serde_json::json!(""),
+            ),
+            (
+                "ordinary tool",
+                "/messages/0/content/0/name",
+                serde_json::json!("Read"),
+            ),
+            (
+                "non-noop wakeup",
+                "/messages/0/content/0/input/noop",
+                serde_json::json!(false),
+            ),
+            (
+                "string noop",
+                "/messages/0/content/0/input/noop",
+                serde_json::json!("true"),
+            ),
+            (
+                "missing noop",
+                "/messages/0/content/0/input",
+                serde_json::json!({}),
+            ),
+            (
+                "unacknowledged wakeup",
+                "/messages/1/content/0/content",
+                serde_json::json!("Scheduling failed"),
+            ),
+            (
+                "additional user work",
+                "/messages/1/content",
+                serde_json::json!([
+                    {"type":"tool_result","tool_use_id":"wake_1","content":"Next wakeup scheduled for 16:06:00. Nothing more to do this turn."},
+                    {"type":"text","text":"Now implement the next change."}
+                ]),
+            ),
+            (
+                "unresolved sibling call",
+                "/messages/0/content",
+                serde_json::json!([
+                    {"type":"tool_use","id":"wake_1","name":"ScheduleWakeup","input":{"noop":true}},
+                    {"type":"tool_use","id":"other","name":"Read","input":{}}
+                ]),
+            ),
+            (
+                "wrong preceding role",
+                "/messages/0/role",
+                serde_json::json!("user"),
+            ),
+            (
+                "ordinary prompt",
+                "/messages",
+                serde_json::json!([{"role":"user","content":"hello"}]),
+            ),
+        ] {
+            let mut body = noop_wakeup_tail();
+            *body.pointer_mut(pointer).unwrap() = value;
+            assert!(!permits(body), "must reject {name}");
+        }
+    }
+
     #[test]
     fn terminal_only_done_upstream_is_empty_completion() {
         let body = upstream_sse(&[serde_json::json!({
@@ -2814,6 +2987,7 @@ mod tests {
                 compact_boundary: false,
                 attempt: None,
             },
+            false,
         )
         .await
         {
@@ -2971,6 +3145,7 @@ mod tests {
                 attempt: None,
             },
             config::CodexTransport::WebSocket,
+            false,
         )
         .await;
         let bytes = tokio::time::timeout(Duration::from_secs(12), response.into_body().collect())
@@ -3031,6 +3206,7 @@ mod tests {
                 attempt: None,
             },
             config::CodexTransport::WebSocket,
+            false,
         )
         .await;
         let bytes = tokio::time::timeout(Duration::from_secs(20), response.into_body().collect())
@@ -3092,6 +3268,7 @@ mod tests {
                     attempt: None,
                 },
                 config::CodexTransport::WebSocket,
+                false,
             )
             .await;
             let bytes =
@@ -3266,6 +3443,7 @@ mod tests {
                     attempt: Some(compaction_attempt),
                 },
                 config::CodexTransport::WebSocket,
+                false,
             ),
         )
         .await
@@ -3381,6 +3559,7 @@ mod tests {
                     attempt: Some(compaction_attempt),
                 },
                 config::CodexTransport::WebSocket,
+                false,
             )
             .await
         });
@@ -3466,6 +3645,7 @@ mod tests {
                     attempt: Some(compaction_attempt),
                 },
                 config::CodexTransport::WebSocket,
+                false,
             ),
         )
         .await
@@ -3652,6 +3832,7 @@ mod tests {
                     attempt: Some(compaction_attempt),
                 },
                 config::CodexTransport::WebSocket,
+                false,
             )
             .await
         });

@@ -3570,6 +3570,134 @@ async fn smoke_codex_websocket_empty_completions_exhaust_to_service_unavailable(
     clear_codex_websocket_pool_for_tests();
 }
 
+fn noop_wakeup_request(stream: bool) -> Value {
+    json!({
+        "model": "gpt-6.1-sol",
+        "max_tokens": 64,
+        "stream": stream,
+        "tools": [{"name":"ScheduleWakeup", "input_schema":{
+            "type":"object", "properties":{"noop":{"type":"boolean"}}
+        }}],
+        "messages": [
+            {"role":"user", "content":"Schedule the next checkpoint, then wait."},
+            {"role":"assistant", "content":[{
+                "type":"tool_use", "id":"call_wakeup", "name":"ScheduleWakeup",
+                "input":{"noop":true,"delaySeconds":1200}
+            }]},
+            {"role":"user", "content":[{
+                "type":"tool_result", "tool_use_id":"call_wakeup",
+                "content":"Next wakeup scheduled for 16:06:00 (in 1243s). Nothing more to do this turn — the harness re-invokes you when the wakeup fires or a task-notification arrives."
+            }]}
+        ]
+    })
+}
+
+#[allow(clippy::await_holding_lock)]
+async fn check_noop_wakeup_completion(
+    transport: &str,
+    stream: bool,
+    request: Value,
+    accepted: bool,
+) {
+    let _guard = env_lock();
+    let _delay_guard = ZeroRetryDelayGuard::enable();
+    let config = TempDir::new().unwrap();
+    let _state_env = EnvGuard::set("XDG_STATE_HOME", config.path());
+    write_auth(config.path(), "codex");
+    clear_all_continuations_for_tests();
+    clear_codex_websocket_pool_for_tests();
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let upstream = if transport == "websocket" {
+        spawn_websocket_always_empty_completion_upstream(attempts.clone()).await
+    } else {
+        let attempts = attempts.clone();
+        spawn_http_upstream(move |_body: Value| {
+            attempts.fetch_add(1, Ordering::SeqCst);
+            empty_completion_sse()
+        })
+        .await
+    };
+    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
+    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", transport);
+    let response = call_messages_body(request).await;
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = String::from_utf8_lossy(&body);
+    if !accepted {
+        assert!(
+            text.contains("Codex completed without producing output"),
+            "{text}"
+        );
+        if stream {
+            assert!(text.contains("event: error"), "{text}");
+            assert!(!text.contains("event: message_stop"), "{text}");
+        } else {
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{text}");
+        }
+    } else if stream {
+        assert_eq!(status, StatusCode::OK, "{text}");
+        assert!(!text.contains("event: error"), "{text}");
+        assert_eq!(text.matches("event: message_stop").count(), 1, "{text}");
+        assert!(text.contains("\"stop_reason\":\"end_turn\""), "{text}");
+        assert!(
+            !text.contains("event: content_block_start"),
+            "must not fabricate content: {text}"
+        );
+    } else {
+        assert_eq!(status, StatusCode::OK, "{text}");
+        let response: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(response["stop_reason"], "end_turn");
+        assert_eq!(response["content"], json!([]));
+    }
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        if accepted { 1 } else { 3 },
+        "only acknowledged no-op silence may skip retries"
+    );
+    clear_all_continuations_for_tests();
+    clear_codex_websocket_pool_for_tests();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn smoke_codex_noop_wakeup_websocket_stream() {
+    check_noop_wakeup_completion("websocket", true, noop_wakeup_request(true), true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn smoke_codex_noop_wakeup_websocket_buffered() {
+    check_noop_wakeup_completion("websocket", false, noop_wakeup_request(false), true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn smoke_codex_noop_wakeup_http_stream() {
+    check_noop_wakeup_completion("http", true, noop_wakeup_request(true), true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn smoke_codex_noop_wakeup_http_buffered() {
+    check_noop_wakeup_completion("http", false, noop_wakeup_request(false), true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn smoke_codex_noop_wakeup_negative_controls() {
+    for stream in [false, true] {
+        for (pointer, value) in [
+            ("/messages/2/content/0/is_error", json!(true)),
+            ("/messages/1/content/0/input/noop", json!(false)),
+            ("/messages/1/content/0/name", json!("Read")),
+        ] {
+            let mut request = noop_wakeup_request(stream);
+            // is_error is optional in the real request; insert it for this control.
+            request["messages"][2]["content"][0]["is_error"] = json!(false);
+            *request.pointer_mut(pointer).unwrap() = value;
+            check_noop_wakeup_completion("http", stream, request, false).await;
+        }
+    }
+}
+
 #[allow(clippy::await_holding_lock)]
 #[tokio::test(flavor = "multi_thread")]
 async fn smoke_codex_websocket_previous_response_id_sends_delta_on_second_turn() {
