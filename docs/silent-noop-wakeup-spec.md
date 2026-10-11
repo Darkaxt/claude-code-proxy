@@ -43,8 +43,13 @@ Do not broadly accept empty responses after arbitrary tools (upstream PR #122).
    the existing exhausted-empty no-client-retry protection. Formatting and
    diff checks passed. Existing Windows-only unused-argument warnings remain
    unchanged; no unrelated warning cleanup was performed.
-2. ACTIVE — R5–R6: release packaging, final verification, commit and
-   public integration-branch synchronization; preserve the running service.
+2. COMPLETE — R5–R6: the release candidate passed the recorded verification
+   and its provenance was retained. Implementation commit
+   `e197d538c8d73282838c1663c12f74ed90c693fc` was pushed to the public integration
+   branch and independently verified with `git ls-remote`. The running proxy
+   retained its original process identity, executable/config/settings digests
+   and successful health check. Activation remains outside this package stage
+   until the user coordinates an idle boundary.
 
 ## Upstream review (2026-10-11)
 
@@ -94,3 +99,8 @@ git diff --check
   settings and watchdog were not changed. This candidate is not yet deployed.
 - Build provenance is retained beside the staged executable in `build-info.json`;
   isolated startup diagnostics are intentional verification evidence.
+- Transactional cleanup removed only reviewed, task-attributed disposable test
+  and release outputs. Transactions `c1be1d2b9350e03b214525152c52df03` and
+  `8043a71d399666cbe1439f645d9cdcb4` both applied without errors or residuals.
+  The staged candidate, source checkout, historical caches, installed binary
+  and verification evidence were preserved.
