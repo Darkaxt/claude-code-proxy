@@ -5,6 +5,7 @@ pub mod compaction;
 pub mod continuation;
 pub mod count_tokens;
 pub(crate) mod events;
+mod flight_recorder;
 pub mod images;
 pub mod native;
 mod recovery;
@@ -257,6 +258,9 @@ impl CodexProvider {
             }
             let mut compaction_ctx = ctx.clone();
             compaction_ctx.monitor = None;
+            let mut compaction_recorder =
+                flight_recorder::Recorder::for_request(&translated, &ctx, "http", None);
+            compaction_recorder.set_compaction(true);
             match request_compaction(self.client.as_ref(), &translated, &compaction_ctx).await {
                 Ok(native_history) => {
                     if store_compaction(session_id, attempt, native_history) {
@@ -267,6 +271,7 @@ impl CodexProvider {
                             None,
                         );
                     } else {
+                        compaction_recorder.fail("compaction_state", 500);
                         log_compaction_event(
                             "server_compaction_failed",
                             &ctx,
@@ -276,6 +281,7 @@ impl CodexProvider {
                     }
                 }
                 Err(CompactionError::Upstream(error)) if error.usage_limit.is_some() => {
+                    compaction_recorder.error(&error);
                     abort_compaction_attempt(Some(session_id), Some(attempt));
                     log_compaction_event(
                         "server_compaction_failed",
@@ -286,6 +292,10 @@ impl CodexProvider {
                     return map_codex_error_to_response(&error);
                 }
                 Err(error) => {
+                    match &error {
+                        CompactionError::Upstream(error) => compaction_recorder.error(error),
+                        _ => compaction_recorder.fail("compaction", 500),
+                    }
                     abort_compaction_attempt(Some(session_id), Some(attempt));
                     log_compaction_event(
                         "server_compaction_failed",
@@ -453,6 +463,15 @@ impl CodexProvider {
             // A successful terminal event with no output would translate into
             // an empty end_turn; retry with full context instead.
             let error = empty_buffered_completion_error();
+            let mut recorder =
+                flight_recorder::Recorder::for_request(&translated, &ctx, transport, None);
+            recorder.set_compaction(compact_boundary);
+            for event in parse_sse_events(&response.body) {
+                if let Ok(payload) = serde_json::from_str(&event.data) {
+                    recorder.observe(&payload);
+                }
+            }
+            recorder.fail("empty_completion", 502);
             drop_live_continuation_for_retry(&mut continuation);
             if !allow_empty_completion_retry(attempt, upstream_started_at.elapsed()) {
                 log_empty_completion_retry(&ctx, attempt, upstream_started_at.elapsed(), None);
@@ -1238,7 +1257,9 @@ async fn live_stream_response_once(
     compaction: LiveStreamCompaction,
     allow_silent_completion: bool,
 ) -> LiveStreamStart {
+    upstream_events.set_diagnostic_compaction(compaction.compact_boundary);
     let estimated_input_tokens = count_translated_tokens(&request_body);
+    upstream_events.set_diagnostic_input_tokens(estimated_input_tokens);
     let mut translator = LiveStreamTranslator::with_estimated_input_tokens(
         message_id,
         model.to_string(),
@@ -1276,6 +1297,7 @@ async fn live_stream_response_once(
         {
             Ok(result) => result,
             Err(message) => {
+                upstream_events.record_local_failure("translator", 502);
                 // A spent subscription window reopens hours from now, so the
                 // retry budget can only burn the request down to the same 429.
                 // Report it once, with the reset clock upstream supplied.
@@ -1346,6 +1368,7 @@ async fn live_stream_response_once(
                     ),
                 ])),
             );
+            upstream_events.record_local_failure("empty_completion", 502);
             return provider_retry(&upstream_events, empty_live_completion_error());
         }
         if translator.has_semantic_output() && !pending_chunk.is_empty() {
@@ -1660,6 +1683,7 @@ fn remaining_live_stream_response(
                     ) {
                         Ok(result) => result,
                         Err(message) => {
+                            upstream_events.record_local_failure("translator", 502);
                             abort_request_state(
                                 ctx.session_id.as_deref(),
                                 &request_continuation,

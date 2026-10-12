@@ -25,6 +25,10 @@ protocol translation, streaming responses, and diagnostics. The built-in
 monitor shows sessions, active and recent requests, errors, token usage, and
 throughput.
 
+This fork also keeps a bounded, content-free [Codex failure flight
+recorder](docs/codex-flight-recorder-spec.md). Successful attempts leave no file;
+failures save recent event metadata, including mid-response disconnects.
+
 ## Quick start with Codex
 
 Install on macOS or Linux:

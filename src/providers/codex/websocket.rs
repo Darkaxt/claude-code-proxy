@@ -65,6 +65,8 @@ pub(crate) struct CodexWebSocketEventStream {
     socket_id: Arc<AtomicU64>,
     full_context_retry: Arc<AtomicBool>,
     provider_retry_handoff: Arc<AtomicBool>,
+    recorder: Option<super::flight_recorder::Recorder>,
+    replaying_first_event: bool,
 }
 
 #[derive(Clone)]
@@ -87,6 +89,8 @@ impl CodexWebSocketEventStream {
                 socket_id: socket_id.clone(),
                 full_context_retry: full_context_retry.clone(),
                 provider_retry_handoff: provider_retry_handoff.clone(),
+                recorder: None,
+                replaying_first_event: false,
             },
             CodexWebSocketSocketIdPublisher {
                 socket_id,
@@ -97,7 +101,44 @@ impl CodexWebSocketEventStream {
     }
 
     pub(crate) async fn recv(&mut self) -> Option<Result<serde_json::Value, CodexError>> {
-        self.receiver.recv().await
+        let item = self.receiver.recv().await;
+        if self.replaying_first_event {
+            self.replaying_first_event = false;
+        } else if let Some(recorder) = self.recorder.as_mut() {
+            match &item {
+                Some(Ok(payload)) => {
+                    if let Some(status) = recorder.observe(payload) {
+                        recorder.fail("upstream_event", status);
+                    }
+                }
+                Some(Err(error)) => recorder.error(error),
+                None => recorder.end_of_stream(),
+            }
+        }
+        item
+    }
+
+    pub(super) fn with_recorder(mut self, recorder: super::flight_recorder::Recorder) -> Self {
+        self.recorder = Some(recorder);
+        self
+    }
+
+    pub(super) fn set_diagnostic_compaction(&mut self, boundary: bool) {
+        if let Some(recorder) = self.recorder.as_mut() {
+            recorder.set_compaction(boundary);
+        }
+    }
+
+    pub(super) fn set_diagnostic_input_tokens(&mut self, tokens: u64) {
+        if let Some(recorder) = self.recorder.as_mut() {
+            recorder.set_estimated_input_tokens(tokens);
+        }
+    }
+
+    pub(super) fn record_local_failure(&mut self, class: &'static str, status: u16) {
+        if let Some(recorder) = self.recorder.as_mut() {
+            recorder.fail(class, status);
+        }
     }
 
     pub(crate) fn socket_id(&self) -> Option<u64> {
@@ -123,6 +164,7 @@ impl CodexWebSocketEventStream {
         &mut self,
         receiver: CodexWebSocketEventReceiver,
     ) -> CodexWebSocketEventReceiver {
+        self.replaying_first_event = true;
         std::mem::replace(&mut self.receiver, receiver)
     }
 }
@@ -2362,7 +2404,21 @@ where
                 let _ = ws.send(Message::Pong(data)).await;
             }
             Some(Ok(Message::Pong(_))) | Some(Ok(Message::Frame(_))) => {}
-            Some(Ok(Message::Close(_))) | None => {
+            Some(Ok(Message::Close(frame))) => {
+                let mut error = missing_terminal_error();
+                if let Some(frame) = frame {
+                    // Preserve numeric close evidence, never the remote reason text.
+                    error.message = format!(
+                        "WebSocket close metadata: {} {} {}",
+                        u16::from(frame.code),
+                        frame.reason.len(),
+                        error.message
+                    );
+                }
+                terminal_item = Some(Err(error));
+                break;
+            }
+            None => {
                 terminal_item = Some(Err(missing_terminal_error()));
                 break;
             }

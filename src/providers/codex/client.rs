@@ -1071,8 +1071,31 @@ impl CodexHttpClient {
         ctx: &RequestContext,
         continuation: Option<&super::continuation::ContinuationReservation>,
     ) -> Result<OwnerAwareCodexResponse, CodexError> {
-        self.post_codex_with_transport(body, ctx, continuation, crate::config::codex_transport())
-            .await
+        let mut recorder = super::flight_recorder::Recorder::for_request(
+            body,
+            ctx,
+            crate::config::codex_transport().as_str(),
+            continuation.and_then(|r| r.candidate().previous_response_id.as_deref()),
+        );
+        let result = self
+            .post_codex_with_transport(body, ctx, continuation, crate::config::codex_transport())
+            .await;
+        match &result {
+            Ok(response) => {
+                for event in parse_sse_events(&response.body) {
+                    if let Ok(payload) = serde_json::from_str(&event.data)
+                        && let Some(status) = recorder.observe(&payload)
+                    {
+                        recorder.fail("upstream_event", status);
+                    }
+                }
+                if !(200..300).contains(&response.status) {
+                    recorder.fail("upstream_status", response.status);
+                }
+            }
+            Err(error) => recorder.error(error),
+        }
+        result
     }
 
     pub async fn post_search(
@@ -1211,9 +1234,16 @@ impl CodexHttpClient {
         body: &ResponsesRequest,
         ctx: &RequestContext,
     ) -> Result<super::websocket::CodexWebSocketEventStream, CodexError> {
-        let receiver = self.stream_codex_http_events(body, ctx).await?;
+        let mut recorder = super::flight_recorder::Recorder::for_request(body, ctx, "http", None);
+        let receiver = match self.stream_codex_http_events(body, ctx).await {
+            Ok(receiver) => receiver,
+            Err(error) => {
+                recorder.error(&error);
+                return Err(error);
+            }
+        };
         let (stream, _) = super::websocket::CodexWebSocketEventStream::pending(receiver);
-        Ok(stream)
+        Ok(stream.with_recorder(recorder))
     }
 
     async fn start_http_event_attempt(
@@ -2019,14 +2049,25 @@ impl CodexHttpClient {
         ctx: &RequestContext,
         continuation: Option<&super::continuation::ContinuationReservation>,
     ) -> Result<super::websocket::CodexWebSocketEventStream, CodexError> {
-        let auth = self.auth_manager.get_auth().await.map_err(|e| CodexError {
-            status: 401,
-            message: "Auth error".to_string(),
-            detail: Some(e.to_string()),
-            retry_after: None,
-            usage_limit: None,
-            origin: CodexErrorOrigin::Auth,
-        })?;
+        let mut recorder = super::flight_recorder::Recorder::for_request(
+            body,
+            ctx,
+            "websocket",
+            continuation.and_then(|r| r.candidate().previous_response_id.as_deref()),
+        );
+        let auth = self
+            .auth_manager
+            .get_auth()
+            .await
+            .map_err(|e| CodexError {
+                status: 401,
+                message: "Auth error".to_string(),
+                detail: Some(e.to_string()),
+                retry_after: None,
+                usage_limit: None,
+                origin: CodexErrorOrigin::Auth,
+            })
+            .inspect_err(|error| recorder.error(error))?;
 
         let turn_id = continuation.and_then(super::continuation::ContinuationReservation::turn_id);
         if should_reset_websocket_pool(continuation)
@@ -2054,7 +2095,7 @@ impl CodexHttpClient {
                 .await;
         });
 
-        Ok(rx)
+        Ok(rx.with_recorder(recorder))
     }
 
     #[allow(clippy::too_many_arguments)]

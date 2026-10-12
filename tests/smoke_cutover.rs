@@ -28,7 +28,155 @@ use tower::util::ServiceExt;
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Exercise the production recorder, including its blocking writer. Dropping
+/// each isolated runtime waits for blocking writes; no polling/sleep is needed.
+#[test]
+fn smoke_flight_recorder_midresponse_close_and_success_discard() {
+    let _guard = env_lock();
+    let config = TempDir::new().unwrap();
+    let state = TempDir::new().unwrap();
+    write_auth(config.path(), "codex");
+    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
+    let _state_env = EnvGuard::set("XDG_STATE_HOME", state.path());
+    let _windows_state_env = EnvGuard::set("LOCALAPPDATA", state.path());
+    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "websocket");
+    let _compact_env = EnvGuard::set("CCP_CODEX_SERVER_COMPACTION", "false");
+    let directory = claude_code_proxy::paths::state_dir().join("diagnostics/codex-flight-recorder");
+
+    for fail in [false, true] {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            clear_codex_websocket_pool_for_tests();
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}",listener.local_addr().unwrap());
+            let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL",url);
+            tokio::spawn(async move {
+                let (socket,_) = listener.accept().await.unwrap();
+                let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+                ws.next().await.unwrap().unwrap();
+                for event in [
+                    json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"PRIVATE_CANARY"}}),
+                    json!({"type":"response.output_text.delta","output_index":0,"delta":"PRIVATE_CANARY"}),
+                ] { ws.send(Message::Text(event.to_string())).await.unwrap(); }
+                if fail {
+                    use tokio_tungstenite::tungstenite::protocol::{CloseFrame,frame::coding::CloseCode};
+                    ws.send(Message::Close(Some(CloseFrame{code:CloseCode::Policy,reason:"PRIVATE_CANARY".into()}))).await.unwrap();
+                } else {
+                    ws.send(Message::Text(json!({"type":"response.completed","response":{"id":"PRIVATE_CANARY","usage":{"input_tokens":270001,"output_tokens":3}}}).to_string())).await.unwrap();
+                }
+            });
+            let response = call_messages_body(json!({"model":"gpt-5.5","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"PRIVATE_CANARY"}]})).await;
+            assert_eq!(response.status(),StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(),usize::MAX).await.unwrap();
+            assert_eq!(String::from_utf8_lossy(&body).contains("event: error"),fail);
+        });
+        drop(runtime);
+        if !fail {
+            assert!(
+                !directory.exists(),
+                "successful request must leave no capture"
+            );
+        }
+    }
+    let files: Vec<_> = std::fs::read_dir(&directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(files.len(), 1);
+    let raw = std::fs::read_to_string(&files[0]).unwrap();
+    let doc: Value = serde_json::from_str(&raw).unwrap();
+    assert!(!raw.contains("PRIVATE_CANARY"));
+    assert_eq!(doc["semantic_output_seen"], true);
+    assert_eq!(doc["terminal_success_seen"], false);
+    assert_eq!(doc["failure"]["close_code"], 1008);
+    assert_eq!(doc["failure"]["close_reason_bytes"], 14);
+    assert!(doc["estimated_input_tokens"].as_u64().unwrap() > 0);
+}
+
+#[test]
+fn smoke_flight_recorder_http_event_error_preserves_only_safe_code() {
+    let _guard = env_lock();
+    let config = TempDir::new().unwrap();
+    let state = TempDir::new().unwrap();
+    write_auth(config.path(), "codex");
+    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
+    let _state_env = EnvGuard::set("XDG_STATE_HOME", state.path());
+    let _windows_state_env = EnvGuard::set("LOCALAPPDATA", state.path());
+    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "http");
+    let directory = claude_code_proxy::paths::state_dir().join("diagnostics/codex-flight-recorder");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async {
+        let upstream = spawn_http_upstream(|_| b"data: {\"type\":\"error\",\"status\":400,\"error\":{\"code\":\"context_length_exceeded\",\"message\":\"PRIVATE_CANARY\"}}\n\n".to_vec()).await;
+        let _url = EnvGuard::set("CCP_CODEX_BASE_URL",upstream);
+        let response = call_messages_body(json!({"model":"gpt-5.5","stream":true,"max_tokens":64,"messages":[{"role":"user","content":"PRIVATE_CANARY"}]})).await;
+        let body = axum::body::to_bytes(response.into_body(),usize::MAX).await.unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("event: error"));
+    });
+    drop(runtime);
+    let files: Vec<_> = std::fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(files.len(), 1);
+    let raw = std::fs::read_to_string(&files[0]).unwrap();
+    let doc: Value = serde_json::from_str(&raw).unwrap();
+    assert!(!raw.contains("PRIVATE_CANARY"));
+    assert_eq!(doc["failure"]["status"], 413);
+    let error = doc["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["type"] == "error")
+        .unwrap();
+    assert_eq!(error["upstream_status"], 400);
+    assert_eq!(error["error_code"], "context_length_exceeded");
+}
+
 static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+#[test]
+fn smoke_flight_recorder_startup_auth_error_survives_writer_failure() {
+    let _guard = env_lock();
+    // Deliberately no auth file; this fails locally without contacting OpenAI.
+    let config = TempDir::new().unwrap();
+    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
+    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "http");
+    for fail_write in [false, true] {
+        let state = TempDir::new().unwrap();
+        let _state_env = EnvGuard::set("XDG_STATE_HOME", state.path());
+        let _windows_state_env = EnvGuard::set("LOCALAPPDATA", state.path());
+        let directory =
+            claude_code_proxy::paths::state_dir().join("diagnostics/codex-flight-recorder");
+        if fail_write {
+            std::fs::create_dir_all(directory.parent().unwrap()).unwrap();
+            std::fs::write(&directory, "preserve-existing-file").unwrap();
+        }
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let response = call_messages_body(json!({"model":"gpt-5.5","stream":true,"max_tokens":64,"messages":[{"role":"user","content":"PRIVATE_CANARY"}]})).await;
+            let body = axum::body::to_bytes(response.into_body(),usize::MAX).await.unwrap();
+            assert_eq!(stream_error_payload(&body)["error"]["type"],"authentication_error");
+        });
+        drop(runtime);
+        if fail_write {
+            assert_eq!(
+                std::fs::read_to_string(directory).unwrap(),
+                "preserve-existing-file"
+            );
+        } else {
+            let file = std::fs::read_dir(directory)
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path();
+            let doc: Value = serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap();
+            assert_eq!(doc["failure"]["origin"], "auth");
+            assert_eq!(doc["failure"]["status"], 401);
+            assert!(!doc.to_string().contains("PRIVATE_CANARY"));
+        }
+    }
+}
 
 /// Serialize all env-var-mutating tests so they never run concurrently.
 fn env_lock() -> std::sync::MutexGuard<'static, ()> {
