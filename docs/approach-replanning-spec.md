@@ -60,7 +60,7 @@ do not install the skill, change live settings/models, or deploy/restart the pro
    Refactoring assessment: one metadata-only state owner, no retry scheduler or
    duplicated ledger implementation; no required consolidation finding.
    Blockers: none. Tracked deferrals: none.
-2. Verify and prepare candidate — ACTIVE
+2. Verify and prepare candidate — COMPLETE
    Acceptance: final R1-R7 reconciliation, fictional cross-thread ledger fixture, focused regression
    checks, build/version/provenance verification, local commit and candidate
    staging complete; expendable scratch cleaned; no live deployment performed.
@@ -74,9 +74,13 @@ do not install the skill, change live settings/models, or deploy/restart the pro
    Reviewed cleanup transaction `fa6b7f26bb97802951abb6195242997e` applied all
    3242 exact task-generated members without errors; source, staged candidates
    and unrelated development cache retained. Live binary/configuration unchanged.
-   Advancement blocker (internal, R7): local commit and candidate build-info
-   binding remain. Commit the verified source and read back matching provenance
-   before claiming preparation complete. No tracked deferrals.
+   Source committed as `c664536153eb2ee204e0e09504e6fe4cc511f607`.
+   Staged build-info was read back and matched the candidate hash, size and
+   source commit. The original live PID 65424, binary/config/settings hashes
+   and prior staged recorder1 candidate were reverified unchanged.
+   Final reconciliation: R1-R7 satisfied within prepare-only scope. No blockers
+   or tracked deferrals. No further consolidation is required; state ownership
+   and ledger responsibility remain explicit. No deployment or publication.
 
 No tracked deferrals. Ledger installation and live activation are outside this
 approved prepare-only scope, not claims of delivered live behavior.
