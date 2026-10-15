@@ -85,6 +85,64 @@ do not install the skill, change live settings/models, or deploy/restart the pro
 No tracked deferrals. Ledger installation and live activation are outside this
 approved prepare-only scope, not claims of delivered live behavior.
 
+## Authorized deployment — 2026-10-15
+
+The user's subsequent `deploy` instruction authorizes activating the prepared
+candidate, overriding the earlier prepare-only restriction for this deployment.
+
+3. Activate verified candidate — BLOCKED
+   Acceptance: verify candidate/rollback identities and an idle request boundary;
+   stop the exact owned supervisor/child; replace the binary and restart through
+   the existing quiet launcher; provide the installed ledger skill path in the
+   proxy process environment; verify the new listener's ownership, version,
+   health and model catalog. Preserve WebSocket/model/Claude configuration and
+   startup collision controls. Record deployed provenance and a usable rollback.
+   Blocker (external, deployment acceptance): the combined owned stop/replace/
+   start command was rejected by execution-tool policy at process creation.
+   That command did not execute; no binary replacement or restart occurred.
+   Launcher preparation was reverted. The enforcement rejection must be
+   resolved through an approved execution path before activation and live
+   verification can proceed. No alternate-shell/API workaround was attempted.
+   No deferrals. The prepared candidate and explicit rollback references remain.
+
+### Reviewed deployment requirements and concrete tooling blocker
+
+The original rejection occurred at `2026-10-15T17:49:19.058Z` for
+`call_e5f971f9b73043499201772f00eec2af`, before PowerShell started. The response
+provided no policy rule ID, trigger explanation or review/exception reference.
+No supported execution-denial review interface is exposed by this tool set.
+This is not evidence of Windows ExecutionPolicy, ACL, UAC or absent user consent.
+Another `deploy` instruction or an administrator token does not resolve it.
+
+The existing stock updater is not a staged-custom-candidate deployment API:
+it discovers upstream releases and deliberately blocks custom-package/fork
+provenance. Do not run stock Apply or weaken that guard for this candidate.
+
+Once enforcement is resolved through a supported route, deployment must use
+one reviewed transaction that binds the exact candidate hash/version/source
+provenance and prior binary, launcher and build-info identities. It must:
+
+- Hold the existing updater coordination mutex and freshly bind process IDs,
+  start times, executable and supervisor ownership. Previously observed PIDs
+  are diagnostic evidence, not future termination authority.
+- Establish an actual idle/drain boundary that prevents new admitted requests
+  from racing activation. One idle monitor snapshot is not a reservation.
+- Signal the existing owned stop event and observe actual supervisor/child exit;
+  activate the binary and required launcher environment as one deployment unit.
+- Start through the quiet launcher and observe both owned-process exit and
+  persisted readiness/error state. Log notifications alone must not be the
+  sole liveness/completion source. Do not add an arbitrary kill deadline.
+- Verify listener identity, installed hash/version, health, model catalog and
+  ledger-path propagation, plus unchanged provider/OAuth/WebSocket/Claude
+  configuration. Record matching deployed build-info.
+- On a genuine failure after stop/replacement, explicitly restore the prior
+  binary, launcher and build-info, restart and verify the recovered service.
+  Disposing watchers and handles in `finally` is not operational rollback.
+
+Preparing or reviewing this transaction does not authorize executing a rewritten
+version of the denied operation. No alternate execution route has been tried.
+The original deployment authorization remains valid; activation stays BLOCKED.
+
 ## Operational use and limits
 
 The agent environment must have `approach-recovery-ledger` available. An optional
