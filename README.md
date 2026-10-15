@@ -29,6 +29,11 @@ This fork also keeps a bounded, content-free [Codex failure flight
 recorder](docs/codex-flight-recorder-spec.md). Successful attempts leave no file;
 failures save recent event metadata, including mid-response disconnects.
 
+Policy interruptions remain errors, with no proxy retry. On the affected
+conversation's next ordinary turn (including a Goal continuation), this fork
+delivers [approach-ledger guidance](docs/approach-replanning-spec.md) for factual
+recordkeeping and independently permitted next work, or a pause.
+
 ## Quick start with Codex
 
 Install on macOS or Linux:

@@ -9,6 +9,7 @@ mod flight_recorder;
 pub mod images;
 pub mod native;
 mod recovery;
+mod replanning;
 pub mod request_summary;
 pub mod search;
 pub mod transcription;
@@ -48,6 +49,7 @@ use self::continuation::{
     record_continuation_for_owner,
 };
 use self::count_tokens::count_translated_tokens;
+use self::replanning::ReplanContext;
 use self::translate::accumulate::accumulate_response_with_traffic;
 use self::translate::live_stream::LiveStreamTranslator;
 use self::translate::model_allowlist::{
@@ -280,7 +282,9 @@ impl CodexProvider {
                         );
                     }
                 }
-                Err(CompactionError::Upstream(error)) if error.usage_limit.is_some() => {
+                Err(CompactionError::Upstream(error))
+                    if error.usage_limit.is_some() || error.cyber_policy =>
+                {
                     compaction_recorder.error(&error);
                     abort_compaction_attempt(Some(session_id), Some(attempt));
                     log_compaction_event(
@@ -315,6 +319,12 @@ impl CodexProvider {
         }
 
         // Check continuation
+        let replanning = ReplanContext::prepare(
+            conversation_identity.as_ref(),
+            &ctx.req_id,
+            compact_boundary,
+            &mut translated,
+        );
         let previous_response_id_enabled = config::codex_previous_response_id();
         let continuation = continuation_candidate_for_owner(
             conversation_identity.as_ref(),
@@ -384,6 +394,7 @@ impl CodexProvider {
                     },
                     configured_transport,
                     allow_silent_completion,
+                    replanning,
                 )
                 .await;
                 preparation_cleanup.disarm();
@@ -435,6 +446,7 @@ impl CodexProvider {
             let response = match result {
                 Ok(r) => r,
                 Err(e) => {
+                    replanning.observe_error(&e);
                     log.warn(
                         "codex_upstream_request_failed",
                         Some(serde_json::Map::from_iter([
@@ -495,6 +507,9 @@ impl CodexProvider {
             sleep(delay.wait_ms).await;
         };
         if let Some(failure) = events::first_event_failure(&upstream.body) {
+            if failure.cyber_policy {
+                replanning.observe_policy();
+            }
             abort_compaction_attempt(ctx.session_id.as_deref(), compaction_attempt);
             abort_continuation_for_owner(&request_continuation);
             return map_codex_event_failure_to_response(&failure);
@@ -568,6 +583,7 @@ impl CodexProvider {
                 ctx.traffic.as_deref(),
             ) {
                 Ok(json) => {
+                    replanning.acknowledge_success();
                     if let Some(monitor) = ctx.monitor.as_ref() {
                         monitor.usage_updated(
                             &ctx.req_id,
@@ -805,6 +821,7 @@ async fn live_stream_response(
     compaction: LiveStreamCompaction,
     transport: config::CodexTransport,
     allow_silent_completion: bool,
+    replanning: ReplanContext,
 ) -> Response {
     let model = model.to_string();
     let request_continuation = continuation.clone();
@@ -896,6 +913,11 @@ async fn live_stream_response(
         };
         let upstream_events = match upstream_events {
             Ok(events) => events,
+            Err(err) if err.cyber_policy => {
+                replanning.observe_error(&err);
+                cleanup.abort();
+                return map_codex_error_to_response(&err);
+            }
             Err(err) if err.origin == client::CodexErrorOrigin::Http => {
                 cleanup.abort();
                 return map_codex_error_to_response(&err);
@@ -972,6 +994,7 @@ async fn live_stream_response(
                 attempts: attempt,
                 deadline: retry_started.map(|at| at + EMPTY_COMPLETION_RETRY_BUDGET),
                 websocket: active_transport != config::CodexTransport::Http,
+                replanning: replanning.clone(),
             },
             upstream_events,
             message_id.clone(),
@@ -1051,6 +1074,11 @@ async fn live_stream_response(
                 error,
                 full_context_retry_attempted,
             } => {
+                if error.cyber_policy {
+                    replanning.observe_error(&error);
+                    cleanup.abort();
+                    return map_codex_error_to_response(&error);
+                }
                 // The incremental HTTP reader performs its own bounded
                 // pre-semantic retries so it can stop immediately when the
                 // consumer disappears. Do not multiply that exhausted retry
@@ -1152,10 +1180,12 @@ fn switch_exhausted_websocket_to_http(
         return false;
     }
     if error.is_some_and(|error| {
-        !matches!(
-            error.origin,
-            client::CodexErrorOrigin::WebSocket | client::CodexErrorOrigin::WebSocketHandshake
-        ) || !(error.status == 0 || matches!(error.status, 500 | 502 | 503 | 504 | 529))
+        error.cyber_policy
+            || !matches!(
+                error.origin,
+                client::CodexErrorOrigin::WebSocket | client::CodexErrorOrigin::WebSocketHandshake
+            )
+            || !(error.status == 0 || matches!(error.status, 500 | 502 | 503 | 504 | 529))
     }) {
         return false;
     }
@@ -1243,6 +1273,7 @@ struct LiveRecovery {
     attempts: u32,
     deadline: Option<Instant>,
     websocket: bool,
+    replanning: ReplanContext,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1275,6 +1306,7 @@ async fn live_stream_response_once(
         let payload = match item {
             Ok(payload) => payload,
             Err(err) => {
+                reconnect.replanning.observe_error(&err);
                 if retryable_live_start_codex_error(&err) {
                     return provider_retry(&upstream_events, err);
                 }
@@ -1286,6 +1318,7 @@ async fn live_stream_response_once(
                 return LiveStreamStart::Response(map_codex_error_to_response(&err));
             }
         };
+        reconnect.replanning.observe_payload(&payload);
         if !generation_started && codex_generation_event(&payload) {
             if let Some(monitor) = ctx.monitor.as_ref() {
                 monitor.generation_started(&ctx.req_id);
@@ -1375,6 +1408,7 @@ async fn live_stream_response_once(
             record_live_stream_downstream_capture(&ctx, &pending_chunk);
             record_live_stream_progress(&ctx, &pending_chunk);
             if terminal {
+                reconnect.replanning.acknowledge_success();
                 update_continuation_from_upstream(
                     ctx.session_id.as_deref(),
                     &request_continuation,
@@ -1399,6 +1433,7 @@ async fn live_stream_response_once(
             ));
         }
         if terminal {
+            reconnect.replanning.acknowledge_success();
             update_continuation_from_upstream(
                 ctx.session_id.as_deref(),
                 &request_continuation,
@@ -1425,6 +1460,7 @@ async fn live_stream_response_once(
             detail: Some(websocket::WEBSOCKET_MISSING_TERMINAL_DETAIL.to_string()),
             retry_after: None,
             usage_limit: None,
+            cyber_policy: false,
             origin: client::CodexErrorOrigin::WebSocket,
         },
     )
@@ -1437,6 +1473,7 @@ fn empty_live_completion_error() -> client::CodexError {
         detail: Some(EMPTY_CODEX_COMPLETION_DETAIL.to_string()),
         retry_after: None,
         usage_limit: None,
+        cyber_policy: false,
         origin: client::CodexErrorOrigin::WebSocket,
     }
 }
@@ -1666,6 +1703,7 @@ fn remaining_live_stream_response(
             };
             match item {
                 Ok(payload) => {
+                    reconnect.replanning.observe_payload(&payload);
                     if restored_pending {
                         recovery::notify(
                             &ctx,
@@ -1720,6 +1758,7 @@ fn remaining_live_stream_response(
                         }
                     }
                     if terminal {
+                        reconnect.replanning.acknowledge_success();
                         update_continuation_from_upstream(
                             ctx.session_id.as_deref(),
                             &request_continuation,
@@ -1733,6 +1772,7 @@ fn remaining_live_stream_response(
                     }
                 }
                 Err(err) => {
+                    reconnect.replanning.observe_error(&err);
                     if reconnect.websocket
                         && err.origin == client::CodexErrorOrigin::WebSocket
                         && retryable_live_start_codex_error(&err)
@@ -1788,6 +1828,21 @@ fn remaining_live_stream_response(
                                     continue 'events;
                                 }
                                 Ok(Err(error)) if retryable_live_start_codex_error(&error) => {}
+                                Ok(Err(error)) if error.cyber_policy => {
+                                    reconnect.replanning.observe_error(&error);
+                                    abort_request_state(
+                                        ctx.session_id.as_deref(),
+                                        &request_continuation,
+                                        compaction.attempt,
+                                    );
+                                    let chunk = translator.error_chunk(
+                                        codex_error_message(&error),
+                                        codex_stream_error_type(&error),
+                                        ctx.traffic.as_deref(),
+                                    );
+                                    let _ = tx.send(Ok(Bytes::from(chunk))).await;
+                                    return;
+                                }
                                 _ => break,
                             }
                         }
@@ -1863,6 +1918,7 @@ fn connection_reset_error(message: &str) -> client::CodexError {
         detail: None,
         retry_after: None,
         usage_limit: None,
+        cyber_policy: false,
         origin: client::CodexErrorOrigin::WebSocket,
     }
 }
@@ -1896,6 +1952,7 @@ fn empty_buffered_completion_error() -> client::CodexError {
         detail: Some(EMPTY_CODEX_COMPLETION_DETAIL.to_string()),
         retry_after: None,
         usage_limit: None,
+        cyber_policy: false,
         origin: match config::codex_transport() {
             config::CodexTransport::Http => client::CodexErrorOrigin::BufferedHttp,
             _ => client::CodexErrorOrigin::BufferedWebSocket,
@@ -1996,6 +2053,9 @@ fn is_codex_success_terminal_event(payload: &serde_json::Value) -> bool {
 }
 
 fn retryable_live_start_codex_error(err: &client::CodexError) -> bool {
+    if err.cyber_policy {
+        return false;
+    }
     if err.origin == client::CodexErrorOrigin::WebSocketHandshake {
         if err.detail.as_deref() == Some(websocket::WEBSOCKET_PROXY_TUNNEL_REJECTED_DETAIL) {
             return false;
@@ -2059,6 +2119,7 @@ fn codex_event_failure_error(
         detail: Some(failure.message.clone()),
         retry_after: failure.retry_after.clone(),
         usage_limit: None,
+        cyber_policy: failure.cyber_policy,
         origin,
     }
 }
@@ -2159,6 +2220,17 @@ fn usage_limit_response(limit: &events::CodexUsageLimit) -> Response {
 }
 
 fn map_codex_error_to_response(err: &client::CodexError) -> Response {
+    if err.cyber_policy {
+        let status = StatusCode::from_u16(err.status)
+            .ok()
+            .filter(|status| status.is_client_error() || status.is_server_error())
+            .unwrap_or(StatusCode::BAD_REQUEST);
+        let mut response = json_error(status, "invalid_request_error", codex_error_message(err));
+        response
+            .headers_mut()
+            .insert("x-should-retry", HeaderValue::from_static("false"));
+        return response;
+    }
     if let Some(limit) = err.usage_limit.as_ref() {
         return usage_limit_response(limit);
     }
@@ -2233,7 +2305,13 @@ fn map_codex_failure_to_response(message: &str) -> Response {
 
 fn map_codex_event_failure_to_response(failure: &events::CodexEventFailure) -> Response {
     let status = StatusCode::from_u16(failure.client_status()).unwrap_or(StatusCode::BAD_GATEWAY);
-    let response = json_error(status, failure.client_error_type(), &failure.message);
+    let mut response = json_error(status, failure.client_error_type(), &failure.message);
+    if failure.cyber_policy {
+        response
+            .headers_mut()
+            .insert("x-should-retry", HeaderValue::from_static("false"));
+        return response;
+    }
     if let Some(retry_after) = failure.retry_after.as_deref() {
         ([(http::header::RETRY_AFTER, retry_after)], response).into_response()
     } else {
@@ -3000,6 +3078,7 @@ mod tests {
                 attempts: 0,
                 deadline: None,
                 websocket: false,
+                replanning: ReplanContext::default(),
             },
             rx,
             "msg_test".to_string(),
@@ -3170,6 +3249,7 @@ mod tests {
             },
             config::CodexTransport::WebSocket,
             false,
+            ReplanContext::default(),
         )
         .await;
         let bytes = tokio::time::timeout(Duration::from_secs(12), response.into_body().collect())
@@ -3231,6 +3311,7 @@ mod tests {
             },
             config::CodexTransport::WebSocket,
             false,
+            ReplanContext::default(),
         )
         .await;
         let bytes = tokio::time::timeout(Duration::from_secs(20), response.into_body().collect())
@@ -3293,6 +3374,7 @@ mod tests {
                 },
                 config::CodexTransport::WebSocket,
                 false,
+                ReplanContext::default(),
             )
             .await;
             let bytes =
@@ -3316,6 +3398,7 @@ mod tests {
             detail: Some("invalid request".to_string()),
             retry_after: Some("7".to_string()),
             usage_limit: None,
+            cyber_policy: false,
             origin: client::CodexErrorOrigin::WebSocketHandshake,
         };
         let response = map_codex_error_to_response(&err);
@@ -3334,6 +3417,7 @@ mod tests {
             detail: None,
             retry_after: None,
             usage_limit: None,
+            cyber_policy: false,
             origin: client::CodexErrorOrigin::WebSocket,
         };
 
@@ -3370,6 +3454,7 @@ mod tests {
             detail: None,
             retry_after: None,
             usage_limit: None,
+            cyber_policy: false,
             origin: client::CodexErrorOrigin::WebSocketHandshake,
         };
 
@@ -3384,6 +3469,7 @@ mod tests {
             detail: Some(websocket::WEBSOCKET_PROXY_TUNNEL_REJECTED_DETAIL.to_string()),
             retry_after: None,
             usage_limit: None,
+            cyber_policy: false,
             origin: client::CodexErrorOrigin::WebSocketHandshake,
         };
 
@@ -3398,6 +3484,7 @@ mod tests {
             detail: Some(websocket::WEBSOCKET_KEEPALIVE_FAILURE_DETAIL.to_string()),
             retry_after: None,
             usage_limit: None,
+            cyber_policy: false,
             origin: client::CodexErrorOrigin::WebSocket,
         };
 
@@ -3468,6 +3555,7 @@ mod tests {
                 },
                 config::CodexTransport::WebSocket,
                 false,
+                ReplanContext::default(),
             ),
         )
         .await
@@ -3584,6 +3672,7 @@ mod tests {
                 },
                 config::CodexTransport::WebSocket,
                 false,
+                ReplanContext::default(),
             )
             .await
         });
@@ -3670,6 +3759,7 @@ mod tests {
                 },
                 config::CodexTransport::WebSocket,
                 false,
+                ReplanContext::default(),
             ),
         )
         .await
@@ -3857,6 +3947,7 @@ mod tests {
                 },
                 config::CodexTransport::WebSocket,
                 false,
+                ReplanContext::default(),
             )
             .await
         });
