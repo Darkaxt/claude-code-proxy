@@ -42,6 +42,7 @@ fn valid_id(id: &str) -> bool {
     id.starts_with("gpt-")
         && id.len() > 4
         && !id.ends_with("-fast")
+        && !id.ends_with("-ultrafast")
         && id
             .bytes()
             .all(|c| c.is_ascii_alphanumeric() || b"-_.".contains(&c))
@@ -172,7 +173,8 @@ pub fn base_models() -> Vec<String> {
 pub fn supported_models() -> Vec<String> {
     let mut models = Vec::new();
     for id in base_models() {
-        models.push(format!("{id}-fast"));
+        models
+            .extend(crate::providers::codex::translate::model_allowlist::tier_model_variants(&id));
         models.push(id);
     }
     models.sort_unstable();

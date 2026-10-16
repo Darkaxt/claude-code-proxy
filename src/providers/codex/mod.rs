@@ -3166,8 +3166,14 @@ mod tests {
         assert!(models.contains(&"gpt-6-sol".to_string()));
         assert!(models.contains(&"gpt-6-sol-fast".to_string()));
         assert!(models.contains(&"gpt-6-luna".to_string()));
+        assert!(models.contains(&"gpt-6.1-sol".to_string()));
+        assert!(models.contains(&"gpt-6.1-sol-fast".to_string()));
+        assert!(models.contains(&"gpt-6.1-sol-ultrafast".to_string()));
         assert!(models.contains(&"gpt-5.4".to_string()));
         assert!(models.contains(&"gpt-5.4-mini".to_string()));
+        assert!(models.contains(&"gpt-6-astra-fast".to_string()));
+        assert!(models.contains(&"gpt-6-astra-ultrafast".to_string()));
+        assert!(!models.contains(&"gpt-6-sol-ultrafast".to_string()));
     }
 
     #[test]
@@ -3440,10 +3446,9 @@ mod tests {
 
         assert_eq!(err.status, 503);
         assert_eq!(err.detail.as_deref(), Some(EMPTY_CODEX_COMPLETION_DETAIL));
-        assert_eq!(
-            map_codex_error_to_response(&err).status(),
-            StatusCode::SERVICE_UNAVAILABLE
-        );
+        let response = map_codex_error_to_response(&err);
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()["x-should-retry"], "false");
     }
 
     #[test]

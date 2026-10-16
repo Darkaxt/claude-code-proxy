@@ -72,6 +72,14 @@ fn runtime_model_updates_reach_registry_messages_and_openai_translation() {
     let chat = translate_request(serde_json::json!({"model":"gpt-test-future-sol-fast","messages":[{"role":"user","content":"test"}]})).unwrap();
     assert_eq!(chat.model, "gpt-test-future-sol");
     assert!(chat.use_responses_lite);
+    // Optional upstream tiers must coexist with dynamically loaded models.
+    let advertised = registry.supported_models_for("codex");
+    assert!(advertised.contains(&"gpt-6.1-sol-ultrafast".to_owned()));
+    assert!(!advertised.contains(&"gpt-test-future-sol-ultrafast".to_owned()));
+    assert!(
+        validate_native_request_model(&serde_json::json!({"model":"gpt-6.1-sol-ultrafast"}))
+            .is_ok()
+    );
     fs::write(&path, "{bad").unwrap();
     assert!(
         registry
@@ -95,6 +103,7 @@ fn invalid_manual_metadata_does_not_widen_the_catalog() {
     for invalid in [
         r#"{"models":[{"id":"gpt-metadata-missing"}]}"#,
         r#"{"models":[{"id":"gpt-invalid-fast","responsesLite":true}]}"#,
+        r#"{"models":[{"id":"gpt-invalid-ultrafast","responsesLite":true}]}"#,
         r#"{"models":[{"id":"claude-unrelated","responsesLite":true}]}"#,
         r#"{"models":[{"id":"gpt-duplicate","responsesLite":true},{"id":"gpt-duplicate","responsesLite":false}]}"#,
     ] {
@@ -102,6 +111,7 @@ fn invalid_manual_metadata_does_not_widen_the_catalog() {
         let models = reader.load(&path);
         assert!(!models.contains_key("gpt-metadata-missing"));
         assert!(!models.contains_key("gpt-invalid-fast"));
+        assert!(!models.contains_key("gpt-invalid-ultrafast"));
         assert!(!models.contains_key("claude-unrelated"));
         assert!(!models.contains_key("gpt-duplicate"));
     }
