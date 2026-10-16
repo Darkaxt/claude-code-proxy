@@ -6,7 +6,7 @@ use crate::{
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use axum::{http::StatusCode, response::Response};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 pub const ANTHROPIC_STYLE_ALIASES: &[&str] = &[
@@ -23,6 +23,7 @@ pub const ANTHROPIC_STYLE_ALIASES: &[&str] = &[
     "claude-opus-5-5",
     "fable",
     "claude-fable-5",
+    "claude-fable-5-1",
 ];
 
 pub const CURSOR_PREFIXES: &[&str] = &["cursor:", "cursor-plan:", "cursor-ask:"];
@@ -38,26 +39,12 @@ const CURSOR_LEGACY_MODELS: &[&str] = &[
     "composer-2.5-fast",
 ];
 
-pub(crate) const CODEX_MODELS: &[&str] = &[
-    "gpt-5.2",
-    "gpt-5.3-codex",
-    "gpt-5.3-codex-spark",
-    "gpt-5.4",
-    "gpt-5.4-mini",
-    "gpt-5.5",
-    "gpt-5.6-luna",
-    "gpt-5.6-sol",
-    "gpt-5.6-terra",
-    "gpt-6-astra",
-    "gpt-6-luna",
-    "gpt-6-sol",
-];
-
 pub(crate) const KIMI_MODELS: &[&str] = &["kimi-for-coding", "kimi-k2.6", "kimi-k3", "k2.6", "k3"];
 pub(crate) const GROK_MODELS: &[&str] =
     &["grok-composer-2.5-fast", "grok-4.5", "grok-4.6", "grok-4.7"];
 
 pub struct Registry {
+    runtime_codex_catalog: bool,
     alias_provider: AliasProvider,
     models: BTreeMap<String, Vec<String>>,
     handlers: BTreeMap<String, Arc<dyn Provider>>,
@@ -98,6 +85,7 @@ impl Registry {
         }
 
         Self {
+            runtime_codex_catalog: true,
             alias_provider,
             models,
             handlers,
@@ -120,6 +108,7 @@ impl Registry {
             handlers.insert(name, provider);
         }
         Self {
+            runtime_codex_catalog: false,
             alias_provider,
             models,
             handlers,
@@ -137,7 +126,11 @@ impl Registry {
     }
 
     pub fn supported_models_for(&self, provider: &str) -> Vec<String> {
-        let mut models = self.models.get(provider).cloned().unwrap_or_default();
+        let mut models = if provider == "codex" && self.runtime_codex_catalog {
+            expand_codex_models()
+        } else {
+            self.models.get(provider).cloned().unwrap_or_default()
+        };
         if provider == self.alias_provider.as_str() {
             for alias in ANTHROPIC_STYLE_ALIASES {
                 if !models.iter().any(|value| value == alias) {
@@ -181,7 +174,18 @@ impl Registry {
             return self.handlers.get("cursor").cloned();
         }
 
+        if self.runtime_codex_catalog
+            && crate::providers::codex::translate::model_allowlist::is_valid_model_for_codex(
+                &normalized,
+            )
+        {
+            return self.handlers.get("codex").cloned();
+        }
+
         for (name, models) in &self.models {
+            if name == "codex" && self.runtime_codex_catalog {
+                continue;
+            }
             if models.iter().any(|candidate| candidate == &normalized) {
                 return self.handlers.get(name).cloned();
             }
@@ -317,19 +321,7 @@ const KIMI_CLI: PlaceholderCli = PlaceholderCli { provider: "kimi" };
 const CURSOR_CLI: PlaceholderCli = PlaceholderCli { provider: "cursor" };
 const GROK_CLI: PlaceholderCli = PlaceholderCli { provider: "grok" };
 fn expand_codex_models() -> Vec<String> {
-    let mut set = HashSet::new();
-    let mut out = Vec::new();
-    for model in CODEX_MODELS {
-        if set.insert((*model).to_string()) {
-            out.push((*model).to_string());
-        }
-        let fast = format!("{model}-fast");
-        if set.insert(fast.clone()) {
-            out.push(fast);
-        }
-    }
-    out.sort_unstable();
-    out
+    crate::codex_models::supported_models()
 }
 
 fn build_cursor_models() -> Vec<String> {
@@ -349,6 +341,31 @@ mod tests {
     fn normalize_model_trims_hint() {
         assert_eq!(normalize_incoming_model("gpt-5.4-fast[1m]"), "gpt-5.4-fast");
         assert_eq!(normalize_incoming_model("gpt-5.4-fast"), "gpt-5.4-fast");
+        assert_eq!(
+            normalize_incoming_model("gpt-6-astra-ultrafast[1m]"),
+            "gpt-6-astra-ultrafast"
+        );
+    }
+
+    #[test]
+    fn ultrafast_variant_routes_to_codex_only_where_offered() {
+        let registry = Registry::new(AliasProvider::Codex);
+        for model in [
+            "gpt-6-astra-ultrafast",
+            "gpt-6-astra-ultrafast[1m]",
+            "gpt-6.1-sol-ultrafast",
+        ] {
+            assert_eq!(
+                registry.provider_for_model(model, None).unwrap().name(),
+                "codex"
+            );
+        }
+        for model in ["gpt-6-sol-ultrafast", "gpt-6-luna-ultrafast"] {
+            assert!(
+                registry.provider_for_model(model, None).is_none(),
+                "{model}"
+            );
+        }
     }
 
     #[test]
@@ -376,6 +393,7 @@ mod tests {
             "claude-opus-5-5",
             "fable",
             "claude-fable-5",
+            "claude-fable-5-1",
         ] {
             let p = registry.provider_for_model(model, None);
             assert!(p.is_some(), "{model} should route to a provider");
@@ -422,9 +440,26 @@ mod tests {
     }
 
     #[test]
-    fn gpt_6_sol_and_luna_route_to_codex() {
+    fn gpt_6_models_route_to_codex() {
         let registry = Registry::new(AliasProvider::Codex);
-        for model in ["gpt-6-sol", "gpt-6-sol-fast", "gpt-6-luna"] {
+        for model in [
+            "gpt-6-sol",
+            "gpt-6-sol-fast",
+            "gpt-6-luna",
+            "gpt-6.1-sol",
+            "gpt-6.1-sol-fast",
+        ] {
+            assert_eq!(
+                registry.provider_for_model(model, None).unwrap().name(),
+                "codex"
+            );
+        }
+    }
+
+    #[test]
+    fn gpt_6_1_sol_routes_to_codex() {
+        let registry = Registry::new(AliasProvider::Codex);
+        for model in ["gpt-6.1-sol", "gpt-6.1-sol-fast", "gpt-6.1-sol[1m]"] {
             assert_eq!(
                 registry.provider_for_model(model, None).unwrap().name(),
                 "codex"

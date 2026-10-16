@@ -304,6 +304,7 @@ mod tests {
             EndpointKind::ChatCompletions,
         );
         RequestContext {
+            notification_id: None,
             req_id: "chat-test".into(),
             session_id: Some("session".into()),
             session_seq: None,
@@ -453,6 +454,7 @@ mod tests {
             detail: Some("Try later".into()),
             retry_after: Some("7".into()),
             usage_limit: None,
+            cyber_policy: false,
             origin: super::super::client::CodexErrorOrigin::Http,
         });
         assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
@@ -464,6 +466,7 @@ mod tests {
             detail: None,
             retry_after: None,
             usage_limit: None,
+            cyber_policy: false,
             origin: super::super::client::CodexErrorOrigin::Auth,
         });
         assert_eq!(auth.status, StatusCode::UNAUTHORIZED);

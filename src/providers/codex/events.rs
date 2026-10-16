@@ -24,6 +24,7 @@ pub(crate) struct CodexEventFailure {
     pub status: u16,
     pub message: String,
     pub retry_after: Option<String>,
+    pub cyber_policy: bool,
 }
 
 impl CodexEventFailure {
@@ -147,6 +148,7 @@ pub(crate) fn classify_event_failure(payload: &Value) -> Option<CodexEventFailur
             status: 503,
             message: format!("Incomplete response returned, reason: {reason}"),
             retry_after: None,
+            cyber_policy: false,
         });
     }
     let error = event_error(payload);
@@ -264,7 +266,29 @@ pub(crate) fn classify_event_failure(payload: &Value) -> Option<CodexEventFailur
         status,
         message,
         retry_after,
+        cyber_policy: code == Some("cyber_policy"),
     })
+}
+
+/// Inspect structured failure codes, never prose or generated text. HTTP JSON
+/// errors have no SSE type, so supply one only for their error envelope.
+pub(crate) fn body_has_cyber_policy(body: &[u8]) -> bool {
+    if let Ok(mut value) = serde_json::from_slice::<Value>(body) {
+        if value.get("type").is_none()
+            && let Some(object) = value.as_object_mut()
+        {
+            object.insert("type".into(), Value::String("error".into()));
+        }
+        return classify_event_failure(&value).is_some_and(|failure| failure.cyber_policy);
+    }
+    crate::anthropic::sse::parse_sse_events(body)
+        .into_iter()
+        .any(|event| {
+            serde_json::from_str::<Value>(&event.data)
+                .ok()
+                .and_then(|value| classify_event_failure(&value))
+                .is_some_and(|failure| failure.cyber_policy)
+        })
 }
 
 /// Which known upstream quota window ran out.
