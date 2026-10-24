@@ -28,3 +28,77 @@ No task, launcher, proxy binary or settings need changing. To stop scheduled
 maintenance, disable the existing `Claude Code Proxy Weekly Update Check` and
 `Claude Code Proxy Pending Update Apply` tasks; do not remove the guard to resume
 stock installation over a fork. Version control retains the script history.
+
+## Verified fork activation
+
+`deploy-fork.ps1` is the separate, reusable local fork deployment transaction.
+It requires PowerShell 7.2 or newer and reuses the installed Windows PowerShell
+supervisor. Its default is read-only validation; explicit `-Apply` performs the
+owned restart and installation. Neither mode changes schedules or the stock
+updater's guard.
+
+```powershell
+.\deploy-fork.ps1 -ManifestPath D:\Tools\proxy-release\deployment.json
+.\deploy-fork.ps1 -ManifestPath D:\Tools\proxy-release\deployment.json -Apply
+```
+
+The private JSON manifest has schema `claudegpt.fork_deployment.v1`. Supply:
+
+- `candidateBinary`, `candidateSha256`, `version`, `sourceCommit` and
+  `integratedUpstreamCommit`: exact already-verified runtime identity.
+- `verificationPath` and `verificationSha256`: the retained verification JSON.
+  It must show passing tests, optimized build, isolated startup and child exit,
+  and bind the same binary digest and upstream commit.
+- `sourceRepositoryPath`: the maintained Git checkout used to verify that the
+  exact runtime commit's tree matches the verification evidence. Wrapper-only
+  source changes do not require recompiling an unchanged runtime.
+- `installDirectory`, `configDirectory`, `logDirectory`, `instanceName` and
+  `baseUri`: the existing supervisor installation and loopback endpoint.
+- `expectedInstalledHash`, `expectedInstalledBuildInfoHash`: fresh known-good
+  baseline hashes; unexpected changes refuse activation.
+- `protectedFiles`: objects with absolute `path` and `sha256`. For production,
+  include proxy configuration, dynamic model catalog and client settings.
+- `recoverySkillPath` and `persistentScratch`: installed recovery instructions
+  and a persistent tool-owned directory on D: or E:. These are passed only to
+  the controlled launcher environment, not global user settings.
+- `requiredModelIds`: catalog entries that must be present after activation.
+- `rollbackDirectory`: a new exact recovery directory for this activation.
+  The transaction stores one matching executable/provenance pair and restore
+  instructions. Retain this pair while it remains the active rollback.
+- `receiptPath`: private JSON result outside Git.
+- `consumerReviewPath` and `consumerReviewSha256`: a scoped owner review with
+  `reviewed: true`, `unresolvedConsumers: []` and evidence about background
+  agents, automated continuations and scheduled request producers. This review
+  supplements the fresh monitor and Claude-process checks; an empty monitor is
+  not an admission reservation. Refuse activation if consumer safety is unclear.
+
+The transaction binds supervisor/child start identities and executable paths,
+uses the existing updater mutex and supervisor stop event, observes exits, and
+starts the same supervisor without a console. Startup observation uses native
+file/process events and diagnostic HTTP boundaries, with no execution deadline.
+The server's listener event is mirrored to the supervisor's existing content-free
+stderr category log. Protected configuration files are never copied or edited.
+
+If post-stop installation/startup/verification fails, the transaction stops its
+owned replacement, restores both known-good files, restarts through the same
+controlled supervisor and verifies the original version, hash and model catalog.
+`rolled_back` is reported only after recovery verification; otherwise the receipt
+says `recovery_incomplete`. Preserve the receipt and exact rollback paths.
+
+For manual recovery, inspect the manifest and receipt, establish safe consumers,
+stop and observe the recorded owned supervisor/child, restore the receipt's two
+rollback files to the installation, and use the script's `Start-ForkSupervisor`
+and `Wait-ForkReady` functions with that same manifest and original hash/version.
+Put any recovery automation in a reviewed script file. Never overwrite changed
+configuration to make a recovery check pass.
+
+`test-deploy-fork.ps1` exercises an isolated installation on an OS-selected port,
+using real verified binaries and the existing supervisor. It proves non-activating
+validation, pre-stop refusals, controlled activation, and recovery after a real
+post-start catalog check fails. It performs no inference. Supply an exact new
+fixture directory and retain/clean its output through transactional-cleanup only
+after all owned processes exit. The fixture uses the supervisor's existing
+process-name scope option so it can coexist with production; production retains
+the original global collision guard. The existing supervisor fixes state home
+to LocalAppData, so its fixture may append metadata to the existing shared proxy
+log; never delete that pre-existing log as fixture cleanup.

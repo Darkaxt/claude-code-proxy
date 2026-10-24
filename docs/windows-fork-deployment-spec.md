@@ -1,0 +1,19 @@
+# Verified local fork deployment
+
+Authority: the user's October 24 request for a reusable deployment script, retaining the earlier instruction to apply upstream and deploy. This adds a maintained local delivery tool. It does not replay the historical inline ZIP/status-rewrite operation or change enforcement, access programs, provider settings, credentials or schedules.
+
+## Requirements
+
+- D1: Put the complete operation in `maintenance/windows/deploy-fork.ps1`, invoked with a short command and a private manifest. Default to validation; require `-Apply` for activation. Keep implementation and arguments reviewable. Never interpret a local Inspector prediction as execution permission.
+- D2: Verify exact candidate SHA-256/version, runtime source/upstream commits and verification evidence. Verify current installed executable/provenance, protected files and exact supervisor/child/listener identities before mutation. Reject malformed inputs and active/ambiguous consumers without stopping anything.
+- D3: Use the existing updater mutex, installed supervisor and its owned stop event; observe actual exits. Use hidden controlled startup with the installed recovery skill and persistent process-local D:/E: scratch. Preserve startup collision protection and the stock-updater fork guard. Do not add a scheduler, daemon, forced deadline or retry of an enforcement denial.
+- D4: Keep one explicitly identified known-good executable and matching provenance for each activation, with restore/restart instructions. Any failure after stopping must restore that state and verify its owned listener, health, version, catalog and protected hashes. Record incomplete recovery truthfully.
+- D5: Verify delivered/installed hash, version, owned listener, health, expected models and protected hashes. Record exact receipts outside Git; no credentials, prompts or outputs. Existing runtime regression/build evidence may be reused when runtime code is unchanged.
+- D6: Meaningful isolated checks must prove validation, wrong-hash/consumer refusal, successful controlled activation and recovery after a real post-start verification failure, without real inference or production changes. Keep user-removed coordination files absent. Clean exact fixture expendables transactionally after all owned processes exit.
+
+## Stages
+
+1. Reusable transaction and isolated verification - COMPLETE. D1-D6 implementation and isolated acceptance passed, including source-tree binding, default validation, wrong-hash/consumer refusal with the same child retained, successful owned activation, and actual post-start failure with verified rollback. All fixture supervisors/children exited and exact fixture cleanup transactions applied without errors. Runtime source/build commit 191752f remains unchanged. Refactoring assessment: lifecycle and identity checks have one implementation shared by activation/recovery; no additional consolidation is required.
+2. Source synchronization and final local delivery - ACTIVE. Commit/push the verified deployment tool, prepare the exact production manifest, inspect current consumers/scheduled producers, preflight the reviewed invocation, and perform authorized activation only when its safety conditions pass. Independently read back the installed result. A live tool rejection must be retained and must not be rewritten or replayed. After verified delivery, restore the existing daily upstream-integration/build/deployment automation to this owner using supported tooling, preserving its identity and timing; do not create a duplicate (explicit user instruction).
+
+No tracked deferrals. Overall completion requires the verified local delivery, or an exact external blocker and preserved verified candidate. A script file is an engineering requirement, not a way around a rejected command.
