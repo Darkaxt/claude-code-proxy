@@ -1,6 +1,6 @@
 [package]
 name = "claude-code-proxy"
-version = "0.1.46-pr158.stream1.catalog1.provenance1.noop1.recorder1.replan1"
+version = "0.1.47-pr158.stream1.catalog1.provenance1.noop1.recorder1.replan1"
 description = "Anthropic-compatible proxy for Claude Code provider backends"
 edition = "2024"
 authors = ["Claude Code Proxy contributors"]
