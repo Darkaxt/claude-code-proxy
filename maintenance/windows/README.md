@@ -102,3 +102,36 @@ process-name scope option so it can coexist with production; production retains
 the original global collision guard. The existing supervisor fixes state home
 to LocalAppData, so its fixture may append metadata to the existing shared proxy
 log; never delete that pre-existing log as fixture cleanup.
+
+## Fork environment at sign-in
+
+Deployment sets a process-local environment, which is lost when the original
+Startup launcher runs after reboot. `start-fork-hidden.vbs` supplies that same
+environment to the existing adjacent `supervise-proxy.ps1`. It requires two
+explicit arguments: an existing D:/E: persistent scratch directory and an absolute
+installed recovery-skill path. Missing inputs refuse launch. It uses hidden
+Windows PowerShell, waits for actual supervisor exit and propagates its result.
+It never changes global environment, provider settings, schedules or collision
+controls. The extra waiting wscript process exits when its supervisor exits.
+
+`install-fork-startup.ps1` updates only the existing installed `start-hidden.vbs`
+and existing Startup shortcut, under the existing updater mutex. Default mode
+validates without changes; `-Apply` installs; `-Restore` restores the exact saved
+launcher/shortcut pair after verifying the installed receipt. No mode restarts
+the live proxy. Use the usual safe-consumer deployment transaction separately
+when the current processes need the corrected environment.
+
+The private manifest schema is `claudegpt.fork_startup.v1`, with absolute paths
+`launcherSource`, `installedLauncher`, `startupShortcut`, `persistentScratch`,
+`recoverySkillPath`, `rollbackDirectory` (new) and `receiptPath`. Bind SHA256 values
+`launcherSha256`, `expectedLauncherSha256`, `expectedShortcutSha256`, plus exact
+old shortcut `expectedArguments`. The shortcut must already target system
+wscript.exe with its installation directory as working directory. Retain the
+manifest, receipt and rollback pair for restoration; restore refuses unrelated
+changed files. Unchanged Rust verification remains applicable to this wrapper.
+
+Run `test-fork-startup.ps1 -FixtureRoot <new-exact-task-directory>` for an isolated
+real Windows launcher/installer/restore check, including clean-parent environment
+propagation, invalid-input refusal, non-activating validation and exact restoration.
+The fictional supervisor exits without serving or invoking a provider. Clean
+the fixture transactionally after its owned process completion.

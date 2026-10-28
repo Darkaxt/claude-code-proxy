@@ -17,3 +17,28 @@ Authority: the user's October 24 request for a reusable deployment script, retai
 2. Source synchronization and final local delivery - COMPLETE. The verified tool was committed and pushed normally; production manifest validation, fresh scoped consumer/scheduled-producer review and invocation preflight preceded owned activation. Independent installed readback verified v0.1.46 runtime commit 191752f, SHA-256, matching provenance, exact listener/supervisor identities, health, expected catalog entries and protected hashes. Both processes' controlled recovery-skill and persistent-scratch environment were read back. The retained known-good executable/provenance pair has a reviewed restore script whose default validation passed; automatic recovery was exercised in the isolated fixture. The daily automation had been deleted, as confirmed by its supported update API; it was restored once with the same identity, daily timing, correct upstream/build/deployment purpose and current owner. Exact task scratch was cleaned transactionally without residuals. No new execution rejection occurred. Real provider inference and actual agent ledger compliance are not claimed.
 
 No blockers or tracked deferrals remain. The versioned local release and actual installation are verified; runtime regression/build evidence remains applicable because deployment-tool and closure-document changes do not modify runtime source. Private manifest, verification, activation/independent receipts, rollback, environment and automation evidence are retained outside Git. A script file is an engineering requirement, not a way around a rejected command.
+
+## Sign-in environment repair - 2026-10-28
+
+The recurring maintenance contract also requires the controlled child environment
+after ordinary Startup launches. The original unchanged launcher inherited C:
+scratch and omitted the recovery-skill path after reboot, although the installed
+runtime remained healthy. This repair preserves that standing requirement.
+
+- L1: Supply explicit persistent D:/E: scratch, installed recovery-skill path and
+  content-free readiness logging to the existing hidden supervisor at sign-in;
+  do not change global environment, provider settings, schedules or collision rules.
+- L2: Bind and validate the exact original launcher and existing shortcut. Install
+  under the updater mutex with matching rollback files and a verified restore
+  procedure. Default validation and installation must not restart the proxy.
+- L3: Prove the complete launcher/install/restore workflow in an isolated fixture
+  with a fictional supervisor: original loss reproduced, clean-parent environment
+  delivered, invalid inputs refused, actual completion and exit-code propagation,
+  exact restoration. No real inference or Rust rebuild for wrapper-only changes.
+- L4: Deliver the verified launcher to the existing user-local installation and
+  existing Startup shortcut. Activate the unchanged qualified runtime only after
+  fresh consumer review through the existing owned lifecycle. Verify actual
+  process environment, identities, health/catalog and protected configuration.
+
+Run stages and current reconciliation are retained in the private dated maintenance
+record. L1-L3 belong to launcher repair/qualification; L4 to verified delivery.
