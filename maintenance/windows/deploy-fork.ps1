@@ -23,11 +23,38 @@ function Get-ForkModels($M) {
     $response=Invoke-RestMethod -Uri ($M.baseUri+'/v1/models') -TimeoutSec 10
     return @($response.data | ForEach-Object { $_.id } | Sort-Object)
 }
+function Assert-ForkPausedClients($Review,[object[]]$Clients) {
+    if (-not $Clients.Count) { return }
+    if ($Review.userConfirmedPause -ne $true -or
+        $Review.pauseScope -ne 'listed-clients-and-continuations' -or
+        [string]::IsNullOrWhiteSpace($Review.pauseAuthorizationSource)) { throw 'claude_clients_active' }
+    $paused=@($Review.pausedClients)
+    if ($paused.Count -ne $Clients.Count) { throw 'paused_client_set_changed' }
+    foreach ($client in $Clients) {
+        $match=@($paused | Where-Object { $_.pid -eq $client.Id })
+        if ($match.Count -ne 1 -or $match[0].paused -ne $true -or
+            $match[0].executablePath -ne $client.Path -or
+            [DateTimeOffset]$match[0].started -ne [DateTimeOffset]$client.StartTime.ToUniversalTime()) {
+            throw 'paused_client_identity_changed'
+        }
+    }
+}
 function Assert-ForkConsumers($M) {
     Assert-ForkHash $M.consumerReviewPath $M.consumerReviewSha256 'consumer_review_changed'
     $review=Get-Content -LiteralPath $M.consumerReviewPath -Raw | ConvertFrom-Json
     if (-not $review.reviewed -or @($review.unresolvedConsumers).Count) { throw 'consumer_review_unresolved' }
-    if (@(Get-Process -Name claude -ErrorAction SilentlyContinue).Count) { throw 'claude_clients_active' }
+    $clients=@(Get-Process -Name claude -ErrorAction SilentlyContinue)
+    Assert-ForkPausedClients $review $clients
+    if ($clients.Count) {
+        # A confirmed paused client may retain an idle loopback keepalive. Bind
+        # both socket ends so a different producer cannot inherit that review.
+        $port=([Uri]$M.baseUri).Port
+        foreach ($connection in @(Get-NetTCPConnection -LocalPort $port -State Established -ErrorAction SilentlyContinue)) {
+            $peers=@(Get-NetTCPConnection -LocalPort $connection.RemotePort -RemotePort $port -State Established -ErrorAction SilentlyContinue |
+                Where-Object { $_.LocalAddress -eq $connection.RemoteAddress -and $_.RemoteAddress -eq $connection.LocalAddress })
+            if ($peers.Count -ne 1 -or $peers[0].OwningProcess -notin @($clients.Id)) { throw 'unreviewed_proxy_connection' }
+        }
+    }
     $monitor=Invoke-RestMethod -Uri ($M.baseUri+'/monitor') -TimeoutSec 10
     if ($null -eq $monitor.snapshot) { throw 'monitor_unavailable' }
     if ($null -ne $monitor.snapshot.active -and @($monitor.snapshot.active).Count) { throw 'requests_active' }

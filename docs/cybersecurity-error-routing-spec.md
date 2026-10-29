@@ -36,6 +36,13 @@ new credentials, enrollment, access-program changes or refusal suppression.
   Verify actual installed hash/version/provenance, owned process/listener,
   health/catalog/protected settings and recovery environment. Preserve one
   usable rollback. Clean exact task scratch transactionally after last use.
+  Authorized 2026-10-29 delivery update: the user explicitly paused both client
+  threads and instructed deployment with those clients open. Support that scoped
+  restart boundary in the existing deployer using a hash-bound pause statement,
+  exact complete client PID/start/path identities and connection-peer ownership.
+  Preserve the default closed-client requirement, active-request refusal, fresh
+  repeated checks, mutex, protected state, owned lifecycle and rollback behavior.
+  Wrapper-only changes reuse the unchanged verified runtime candidate.
 
 ## Stages
 

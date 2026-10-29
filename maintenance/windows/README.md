@@ -72,6 +72,19 @@ The private JSON manifest has schema `claudegpt.fork_deployment.v1`. Supply:
   supplements the fresh monitor and Claude-process checks; an empty monitor is
   not an admission reservation. Refuse activation if consumer safety is unclear.
 
+The default consumer gate refuses any running Claude client. An explicit owner
+pause can instead be recorded in that hash-bound review with
+`userConfirmedPause: true`, `pauseScope: "listed-clients-and-continuations"`, a
+nonempty `pauseAuthorizationSource`, and `pausedClients` entries containing
+`pid`, UTC `started`, `executablePath` and `paused: true`. This requires the user
+to have paused all listed threads and their request-producing continuations for
+the restart. It is not an inferred pause from an empty monitor or low activity.
+The exact complete current Claude process set must match those identities at
+each deployment check. Any established loopback connections must resolve to
+those clients, and active proxy requests still refuse activation. New/replaced
+clients, unknown socket peers or an unresolved producer invalidate the review.
+This contract neither stops client processes nor resumes their threads.
+
 The transaction binds supervisor/child start identities and executable paths,
 uses the existing updater mutex and supervisor stop event, observes exits, and
 starts the same supervisor without a console. Startup observation uses native
