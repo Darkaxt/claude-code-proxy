@@ -277,7 +277,27 @@ async fn policy_notice_reaches_goal_turn_without_replay_and_is_owner_scoped() {
                     .contains("approach-recovery-ledger"),
                 "successful terminal response must acknowledge delivery"
             );
+            let state = std::fs::read_to_string(
+                scratch
+                    .path()
+                    .join("claude-code-proxy/replanning-pending.json"),
+            )
+            .unwrap();
+            let state: Value = serde_json::from_str(&state).unwrap();
+            assert_eq!(state["schema"], 1);
+            assert!(
+                state["notices"].as_object().unwrap().is_empty(),
+                "successful matching turn must persist removal"
+            );
         }
+    }
+    let log = std::fs::read_to_string(scratch.path().join("claude-code-proxy/proxy.log")).unwrap();
+    for event in [
+        "replanning_notice_queued",
+        "replanning_notice_attached",
+        "replanning_notice_acknowledged",
+    ] {
+        assert!(log.contains(event), "missing lifecycle receipt {event}");
     }
     server.abort();
     ws_server.abort();

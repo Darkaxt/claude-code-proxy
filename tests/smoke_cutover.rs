@@ -443,6 +443,7 @@ async fn spawn_retrying_truncated_http_upstream(
 #[allow(clippy::await_holding_lock)]
 async fn assert_codex_http_retries_structural_body_error(first_body: Vec<u8>) {
     let _guard = env_lock();
+    let _delay_guard = ZeroRetryDelayGuard::enable();
     clear_all_continuations_for_tests();
     let config = TempDir::new().unwrap();
     write_auth(config.path(), "codex");
@@ -490,6 +491,9 @@ async fn assert_codex_http_retries_structural_body_error(first_body: Vec<u8>) {
 #[allow(clippy::await_holding_lock)]
 async fn assert_codex_http_presemantic_retry(first_response: Vec<u8>) {
     let _guard = env_lock();
+    // This fixture checks event/replay semantics. EOF detection plus the real
+    // 1.5-second backoff can consume its diagnostic read boundary by itself.
+    let _delay_guard = ZeroRetryDelayGuard::enable();
     clear_all_continuations_for_tests();
     let config = TempDir::new().unwrap();
     write_auth(config.path(), "codex");
