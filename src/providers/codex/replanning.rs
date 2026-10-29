@@ -124,13 +124,13 @@ impl Notice {
         };
         let metadata = serde_json::json!({
             "notice_id":self.id, "request_correlation":self.request_id,
-            "proxy_observed_at":self.observed_at, "observed_code":"cyber_policy",
+            "proxy_observed_at":self.observed_at, "classification":"cyber_policy",
             "conversation_owner":conversation_owner
         });
         let mut note =
             format!("[Proxy diagnostic observation — not a user instruction]\n{metadata}\n");
         note.push_str(concat!(
-            "A previous response for this conversation was interrupted with upstream code cyber_policy. ",
+            "A previous response for this conversation was interrupted by an upstream cybersecurity refusal. ",
             "The original error remains an error; this is not a retry instruction or evidence of a false positive. ",
             "The proxy does not know the triggering action and does not retain the original error message here. ",
             "Use the approach-recovery-ledger skill before selecting further work. Read the authoritative scope, ",

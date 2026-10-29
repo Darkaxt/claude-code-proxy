@@ -140,8 +140,9 @@ impl Recorder {
             "input_tokens":payload.pointer("/response/usage/input_tokens").and_then(Value::as_u64),
             "output_tokens":payload.pointer("/response/usage/output_tokens").and_then(Value::as_u64),
             "cached_tokens":payload.pointer("/response/usage/input_tokens_details/cached_tokens").and_then(Value::as_u64),
+            "cyber_policy":events::classify_event_failure(payload).is_some_and(|failure|failure.cyber_policy),
             "error_code":match events::event_error(payload).and_then(|error|error.get("code")).and_then(Value::as_str) {
-                Some(code @ ("context_length_exceeded" | "rate_limit_exceeded" | "server_error" | "overloaded" | "invalid_request_error" | "previous_response_not_found" | "model_not_found" | "insufficient_quota")) => code,
+                Some(code @ ("cyber_policy" | "context_length_exceeded" | "rate_limit_exceeded" | "server_error" | "overloaded" | "invalid_request_error" | "previous_response_not_found" | "model_not_found" | "insufficient_quota")) => code,
                 Some(_) => "other", None => "none",
             },
         });
@@ -371,6 +372,26 @@ fn persist_in(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn policy_classification_retains_no_unknown_codes_or_messages() {
+        let mut recorder = Recorder::new("r", None, "m", "websocket", 1, None);
+        for code in ["cyber_policy", "PRIVATE_CANARY"] {
+            recorder.observe(&json!({"type":"response.failed","response":{"error":{
+                "code":code,"message":"This content was flagged for possible cybersecurity risk. PRIVATE_CANARY"
+            }}}));
+        }
+        recorder
+            .observe(&json!({"type":"error","error":{"code":"other","message":"PRIVATE_CANARY"}}));
+        recorder.observe(&json!({"type":"response.output_text.delta","delta":"This content was flagged for possible cybersecurity risk. PRIVATE_CANARY"}));
+        let doc = recorder.snapshot("upstream", 400, "websocket");
+        assert_eq!(doc["events"][0]["error_code"], "cyber_policy");
+        assert_eq!(doc["events"][1]["error_code"], "other");
+        for index in 0..4 {
+            assert_eq!(doc["events"][index]["cyber_policy"], index < 2);
+        }
+        assert!(!doc.to_string().contains("PRIVATE_CANARY"));
+    }
 
     #[test]
     fn ring_retains_last_events_and_never_free_form_content() {

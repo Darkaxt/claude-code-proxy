@@ -175,6 +175,16 @@ pub(crate) fn classify_event_failure(payload: &Value) -> Option<CodexEventFailur
     let raw_message = error
         .and_then(|value| value.get("message"))
         .and_then(Value::as_str);
+    let cyber_policy = code == Some("cyber_policy")
+        || ((matches!(event_type, "response.failed" | "response.error" | "error")
+            || response_status == Some("failed"))
+            && raw_message.is_some_and(|message| {
+                let message = message.trim_start();
+                message.starts_with("This content was flagged for possible cybersecurity risk.")
+                    || message.starts_with(
+                        "This request has been flagged for possible cybersecurity risk.",
+                    )
+            }));
     let message = match (code, raw_message) {
         (Some("cyber_policy"), None | Some("")) => {
             "This request has been flagged for possible cybersecurity risk.".to_string()
@@ -187,11 +197,13 @@ pub(crate) fn classify_event_failure(payload: &Value) -> Option<CodexEventFailur
         _ => "Upstream error".to_string(),
     };
     let lower = message.to_ascii_lowercase();
-    let context_window = code == Some("context_length_exceeded")
-        || lower.contains("context window")
-        || lower.contains("context length exceeded");
+    let context_window = !cyber_policy
+        && (code == Some("context_length_exceeded")
+            || lower.contains("context window")
+            || lower.contains("context length exceeded"));
 
-    let kind = if context_window
+    let kind = if cyber_policy
+        || context_window
         || matches!(
             code,
             Some(
@@ -236,16 +248,20 @@ pub(crate) fn classify_event_failure(payload: &Value) -> Option<CodexEventFailur
     let status = if context_window {
         413
     } else {
-        explicit_status.unwrap_or(match code {
-            Some("cyber_policy" | "invalid_prompt" | "bio_policy") => 400,
-            Some("insufficient_quota") => 429,
-            Some("usage_not_included") => 403,
-            _ => match kind {
-                CodexFailureKind::RateLimit => 429,
-                CodexFailureKind::Overloaded => 529,
-                CodexFailureKind::Transient => 503,
-                CodexFailureKind::Permanent => 500,
-            },
+        explicit_status.unwrap_or(if cyber_policy {
+            400
+        } else {
+            match code {
+                Some("cyber_policy" | "invalid_prompt" | "bio_policy") => 400,
+                Some("insufficient_quota") => 429,
+                Some("usage_not_included") => 403,
+                _ => match kind {
+                    CodexFailureKind::RateLimit => 429,
+                    CodexFailureKind::Overloaded => 529,
+                    CodexFailureKind::Transient => 503,
+                    CodexFailureKind::Permanent => 500,
+                },
+            }
         })
     };
     let retry_after = error
@@ -266,11 +282,11 @@ pub(crate) fn classify_event_failure(payload: &Value) -> Option<CodexEventFailur
         status,
         message,
         retry_after,
-        cyber_policy: code == Some("cyber_policy"),
+        cyber_policy,
     })
 }
 
-/// Inspect structured failure codes, never prose or generated text. HTTP JSON
+/// Inspect structured failures, never generated text. HTTP JSON
 /// errors have no SSE type, so supply one only for their error envelope.
 pub(crate) fn body_has_cyber_policy(body: &[u8]) -> bool {
     if let Ok(mut value) = serde_json::from_slice::<Value>(body) {
@@ -933,6 +949,50 @@ data: {"type":"response.completed","response":{"status":"completed"}}
             classify_stream_event(&payload),
             CodexStreamEventKind::TerminalSuccess
         );
+    }
+
+    #[test]
+    fn cybersecurity_advisory_in_structured_errors_uses_policy_flow() {
+        for message in [
+            "This content was flagged for possible cybersecurity risk. Fictional account-security advisory.",
+            "  This request has been flagged for possible cybersecurity risk. Fictional advisory.",
+        ] {
+            for code in [Some("fixture_security_advisory"), Some("other"), None] {
+                for status in [None, Some(400), Some(401), Some(503)] {
+                    let mut payload =
+                        serde_json::json!({"type":"error","error":{"message":message}});
+                    if let Some(code) = code {
+                        payload["error"]["code"] = serde_json::json!(code);
+                    }
+                    if let Some(status) = status {
+                        payload["status"] = serde_json::json!(status);
+                    }
+                    let failure = classify_event_failure(&payload).unwrap();
+                    assert!(failure.cyber_policy, "{payload}");
+                    assert!(!failure.retryable(), "{payload}");
+                    assert_eq!(failure.status, status.unwrap_or(400));
+                    assert_eq!(failure.message, message);
+                    let body =
+                        serde_json::to_vec(&serde_json::json!({"error":payload["error"]})).unwrap();
+                    assert!(body_has_cyber_policy(&body));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cybersecurity_advisory_mentions_do_not_classify_other_errors_or_output() {
+        for payload in [
+            serde_json::json!({"type":"error","status":400,"error":{"code":"other","message":"Fictional unrelated failure"}}),
+            serde_json::json!({"type":"error","error":{"message":"Example: This content was flagged for possible cybersecurity risk."}}),
+            serde_json::json!({"type":"response.output_text.delta","delta":"This content was flagged for possible cybersecurity risk."}),
+            serde_json::json!({"type":"response.completed","response":{"status":"completed","output":[{"text":"This content was flagged for possible cybersecurity risk."}]}}),
+        ] {
+            assert!(
+                !classify_event_failure(&payload).is_some_and(|failure| failure.cyber_policy),
+                "{payload}"
+            );
+        }
     }
 
     #[test]

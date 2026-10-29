@@ -73,6 +73,14 @@ async fn consume(response: Response, policy: bool) {
     }
 }
 
+fn policy_error(mode: usize) -> Value {
+    if mode >= 4 {
+        json!({"code":"fixture_security_advisory","message":"This content was flagged for possible cybersecurity risk. fictional policy interruption; fictional account-security setup guidance."})
+    } else {
+        json!({"code":"cyber_policy","message":"fictional policy interruption"})
+    }
+}
+
 #[tokio::test]
 async fn policy_notice_reaches_goal_turn_without_replay_and_is_owner_scoped() {
     let scratch = tempfile::tempdir().unwrap();
@@ -104,15 +112,16 @@ async fn policy_notice_reaches_goal_turn_without_replay_and_is_owner_scoped() {
             let mut captures = captures.lock().unwrap();
             let policy = captures.len().is_multiple_of(4);
             captures.push(request);
-            if policy && mode.load(Ordering::SeqCst) >= 2 {
-                return Response::builder().status(if mode.load(Ordering::SeqCst) == 3 { 401 } else { 500 }).header("content-type","application/json")
-                    .body(Body::from(json!({"error":{"code":"cyber_policy","message":"fictional policy interruption"}}).to_string())).unwrap();
+            let fixture_mode = mode.load(Ordering::SeqCst);
+            if policy && matches!(fixture_mode, 2 | 3 | 5 | 6) {
+                return Response::builder().status(if matches!(fixture_mode, 3 | 6) { 401 } else { 500 }).header("content-type","application/json")
+                    .body(Body::from(json!({"error":policy_error(fixture_mode)}).to_string())).unwrap();
             }
             let body = if policy {
-                let prefix = if mode.load(Ordering::SeqCst) == 1 {
+                let prefix = if matches!(fixture_mode, 1 | 7) {
                     success().split("\n\n").take(2).map(|s|format!("{s}\n\n")).collect::<String>()
                 } else { String::new() };
-                format!("{prefix}data: {}\n\n",json!({"type":"response.failed","response":{"status":"failed","error":{"code":"cyber_policy","message":"fictional policy interruption"}}}))
+                format!("{prefix}data: {}\n\n",json!({"type":"response.failed","response":{"status":"failed","error":policy_error(fixture_mode)}}))
             } else { success() };
             Response::builder().header("content-type","text/event-stream").body(Body::from(body)).unwrap()
         }
@@ -150,7 +159,8 @@ async fn policy_notice_reaches_goal_turn_without_replay_and_is_owner_scoped() {
                         policy
                     };
                     let events = if policy {
-                        let mut events: Vec<Value> = if mode.load(Ordering::SeqCst) == 1 {
+                        let fixture_mode = mode.load(Ordering::SeqCst);
+                        let mut events: Vec<Value> = if matches!(fixture_mode, 1 | 7) {
                             success()
                                 .split("\n\n")
                                 .take(2)
@@ -160,8 +170,8 @@ async fn policy_notice_reaches_goal_turn_without_replay_and_is_owner_scoped() {
                         } else {
                             Vec::new()
                         };
-                        let mut event = json!({"type":"response.failed","response":{"status":"failed","error":{"code":"cyber_policy","message":"fictional policy interruption"}}});
-                        if mode.load(Ordering::SeqCst) == 3 {
+                        let mut event = json!({"type":"response.failed","response":{"status":"failed","error":policy_error(fixture_mode)}});
+                        if matches!(fixture_mode, 3 | 6) {
                             event["status"] = json!(401);
                         }
                         events.push(event);
@@ -196,6 +206,13 @@ async fn policy_notice_reaches_goal_turn_without_replay_and_is_owner_scoped() {
         ("http", &http_url, 2),
         ("http", &http_url, 3),
         ("websocket", &ws_url, 3),
+        ("http", &http_url, 4),
+        ("websocket", &ws_url, 4),
+        ("http", &http_url, 5),
+        ("http", &http_url, 6),
+        ("websocket", &ws_url, 6),
+        ("http", &http_url, 7),
+        ("websocket", &ws_url, 7),
     ] {
         mode.store(fixture_mode, Ordering::SeqCst);
         unsafe {
@@ -250,6 +267,9 @@ async fn policy_notice_reaches_goal_turn_without_replay_and_is_owner_scoped() {
             assert!(instructions.contains("Completed tool calls remain completed"));
             assert!(instructions.contains(&session));
             assert!(instructions.contains("Configured skill file"));
+            assert!(instructions.contains("\"classification\":\"cyber_policy\""));
+            assert!(!instructions.contains("\"observed_code\""));
+            assert!(!instructions.contains("upstream code cyber_policy"));
             assert!(
                 !requests[offset + 3]["instructions"]
                     .as_str()
