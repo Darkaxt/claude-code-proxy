@@ -8,7 +8,8 @@ use crate::provider::RequestContext;
 use crate::providers::codex::client::{CodexError, CodexHttpClient};
 
 use super::translate::request::{
-    ResponsesContentPart, ResponsesInputItem, ResponsesRequest, is_compact_message_text,
+    COMPACT_DETECTION_TAIL_MESSAGES, ResponsesContentPart, ResponsesInputItem, ResponsesRequest,
+    is_compact_message_text,
 };
 
 const RETAINED_MESSAGE_TOKEN_BUDGET: u64 = 20_000;
@@ -276,26 +277,30 @@ fn split_input_envelope(
 }
 
 fn without_compaction_instruction(input: &[ResponsesInputItem]) -> Vec<ResponsesInputItem> {
-    let mut input = input.to_vec();
-    let remove_empty_message = if let Some(ResponsesInputItem::Message { role, content }) =
-        input.last_mut()
-        && role == "user"
-    {
-        content.retain(|part| {
-            !matches!(
-                part,
-                ResponsesContentPart::InputText { text }
-                    if is_compact_message_text(text)
-            )
-        });
-        content.is_empty()
-    } else {
-        false
-    };
-    if remove_empty_message {
-        input.pop();
-    }
-    input
+    let mut tail_messages = 0;
+    let mut clean = input
+        .iter()
+        .rev()
+        .filter_map(|item| {
+            let mut item = item.clone();
+            if let ResponsesInputItem::Message { role, content } = &mut item {
+                tail_messages += 1;
+                if tail_messages <= COMPACT_DETECTION_TAIL_MESSAGES && role == "user" {
+                    let original_len = content.len();
+                    content.retain(|part| {
+                        !matches!(part, ResponsesContentPart::InputText { text }
+                        if is_compact_message_text(text))
+                    });
+                    if content.len() != original_len && content.is_empty() {
+                        return None;
+                    }
+                }
+            }
+            Some(item)
+        })
+        .collect::<Vec<_>>();
+    clean.reverse();
+    clean
 }
 
 fn is_envelope_item(item: &ResponsesInputItem) -> bool {
@@ -600,6 +605,70 @@ mod tests {
             parse_compaction_response(body).unwrap(),
             ResponsesInputItem::Compaction { encrypted_content } if encrypted_content == "opaque"
         ));
+    }
+
+    #[test]
+    fn compaction_provenance_strips_prompt_before_appended_context() {
+        let input = request(json!([
+            {"type":"message","role":"user","content":[{"type":"input_text","text":"implement the requested feature"}]},
+            {"type":"message","role":"user","content":[
+                {"type":"input_text","text":"CRITICAL: Respond with TEXT ONLY. Do NOT call any tools. Your task is to create a detailed summary of the conversation so far."},
+                {"type":"input_text","text":"keep this adjacent context"},
+                {"type":"input_image","image_url":"data:image/png;base64,retained-image","detail":"high"}
+            ]},
+            {"type":"function_call_output","call_id":"read-1","output":"retained read result"},
+            {"type":"message","role":"assistant","content":[{"type":"output_text","text":"appended context"}]}
+        ]));
+        let clean = without_compaction_instruction(&input.input);
+        let text = serde_json::to_string(&clean).unwrap();
+        assert!(
+            !text.contains("CRITICAL: Respond with TEXT ONLY"),
+            "synthetic instruction leaked: {text}"
+        );
+        assert!(text.contains("keep this adjacent context"));
+        assert!(text.contains("retained read result"));
+        assert!(text.contains("appended context"));
+        assert!(text.contains("retained-image"));
+        let retained = build_compacted_history(
+            &clean,
+            ResponsesInputItem::Compaction {
+                encrypted_content: "opaque".to_string(),
+            },
+        );
+        assert!(
+            !serde_json::to_string(&retained)
+                .unwrap()
+                .contains("CRITICAL:")
+        );
+    }
+
+    #[test]
+    fn compaction_provenance_removes_empty_prompt_message_not_following_context() {
+        let input = request(json!([
+            {"type":"message","role":"user","content":[{"type":"input_text","text":"CRITICAL: Respond with TEXT ONLY. Do NOT call any tools. Your task is to create a detailed summary of the conversation so far."}]},
+            {"type":"message","role":"user","content":[{"type":"input_text","text":"request context"}]}
+        ]));
+        let clean = without_compaction_instruction(&input.input);
+        assert_eq!(clean.len(), 1);
+        assert_eq!(message_text(&clean[0]).as_deref(), Some("request context"));
+    }
+
+    #[test]
+    fn compaction_provenance_preserves_historical_prompts_and_assistant_quotes() {
+        let prompt = "CRITICAL: Respond with TEXT ONLY. Do NOT call any tools. Your task is to create a detailed summary of the conversation so far.";
+        let mut input = request(json!([
+            {"type":"message","role":"user","content":[{"type":"input_text","text":prompt}]}
+        ]))
+        .input;
+        for index in 0..8 {
+            input.extend(request(json!([
+                {"type":"message","role":"assistant","content":[{"type":"output_text","text":format!("{index}: {prompt}")} ]}
+            ])).input);
+        }
+        assert_eq!(
+            serde_json::to_value(without_compaction_instruction(&input)).unwrap(),
+            serde_json::to_value(input).unwrap()
+        );
     }
 
     #[test]

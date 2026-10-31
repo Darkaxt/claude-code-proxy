@@ -1,0 +1,17 @@
+{
+  "models": [
+    {"id": "gpt-5.2", "responsesLite": false},
+    {"id": "gpt-5.3-codex", "responsesLite": false},
+    {"id": "gpt-5.3-codex-spark", "responsesLite": false},
+    {"id": "gpt-5.4", "responsesLite": false},
+    {"id": "gpt-5.4-mini", "responsesLite": false},
+    {"id": "gpt-5.5", "responsesLite": false},
+    {"id": "gpt-5.6-luna", "responsesLite": true},
+    {"id": "gpt-5.6-sol", "responsesLite": true},
+    {"id": "gpt-5.6-terra", "responsesLite": true},
+    {"id": "gpt-6-astra", "responsesLite": true},
+    {"id": "gpt-6-luna", "responsesLite": true},
+    {"id": "gpt-6-sol", "responsesLite": true},
+    {"id": "gpt-6.1-sol", "responsesLite": true}
+  ]
+}

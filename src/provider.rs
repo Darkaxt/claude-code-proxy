@@ -21,6 +21,8 @@ pub enum AuthCommand {
     Logout,
 }
 
+// async_trait adds #[must_use] to methods returning already-must-use futures.
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait Provider: Send + Sync {
     fn name(&self) -> &'static str;
@@ -117,6 +119,7 @@ pub trait CliHandlers: Send + Sync {
 
 #[derive(Debug, Clone)]
 pub struct RequestContext {
+    pub notification_id: Option<String>,
     pub req_id: String,
     pub session_id: Option<String>,
     pub session_seq: Option<u64>,

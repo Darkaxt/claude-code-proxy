@@ -28,7 +28,155 @@ use tower::util::ServiceExt;
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Exercise the production recorder, including its blocking writer. Dropping
+/// each isolated runtime waits for blocking writes; no polling/sleep is needed.
+#[test]
+fn smoke_flight_recorder_midresponse_close_and_success_discard() {
+    let _guard = env_lock();
+    let config = TempDir::new().unwrap();
+    let state = TempDir::new().unwrap();
+    write_auth(config.path(), "codex");
+    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
+    let _state_env = EnvGuard::set("XDG_STATE_HOME", state.path());
+    let _windows_state_env = EnvGuard::set("LOCALAPPDATA", state.path());
+    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "websocket");
+    let _compact_env = EnvGuard::set("CCP_CODEX_SERVER_COMPACTION", "false");
+    let directory = claude_code_proxy::paths::state_dir().join("diagnostics/codex-flight-recorder");
+
+    for fail in [false, true] {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            clear_codex_websocket_pool_for_tests();
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!("http://{}",listener.local_addr().unwrap());
+            let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL",url);
+            tokio::spawn(async move {
+                let (socket,_) = listener.accept().await.unwrap();
+                let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+                ws.next().await.unwrap().unwrap();
+                for event in [
+                    json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"PRIVATE_CANARY"}}),
+                    json!({"type":"response.output_text.delta","output_index":0,"delta":"PRIVATE_CANARY"}),
+                ] { ws.send(Message::Text(event.to_string())).await.unwrap(); }
+                if fail {
+                    use tokio_tungstenite::tungstenite::protocol::{CloseFrame,frame::coding::CloseCode};
+                    ws.send(Message::Close(Some(CloseFrame{code:CloseCode::Policy,reason:"PRIVATE_CANARY".into()}))).await.unwrap();
+                } else {
+                    ws.send(Message::Text(json!({"type":"response.completed","response":{"id":"PRIVATE_CANARY","usage":{"input_tokens":270001,"output_tokens":3}}}).to_string())).await.unwrap();
+                }
+            });
+            let response = call_messages_body(json!({"model":"gpt-5.5","max_tokens":64,"stream":true,"messages":[{"role":"user","content":"PRIVATE_CANARY"}]})).await;
+            assert_eq!(response.status(),StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(),usize::MAX).await.unwrap();
+            assert_eq!(String::from_utf8_lossy(&body).contains("event: error"),fail);
+        });
+        drop(runtime);
+        if !fail {
+            assert!(
+                !directory.exists(),
+                "successful request must leave no capture"
+            );
+        }
+    }
+    let files: Vec<_> = std::fs::read_dir(&directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(files.len(), 1);
+    let raw = std::fs::read_to_string(&files[0]).unwrap();
+    let doc: Value = serde_json::from_str(&raw).unwrap();
+    assert!(!raw.contains("PRIVATE_CANARY"));
+    assert_eq!(doc["semantic_output_seen"], true);
+    assert_eq!(doc["terminal_success_seen"], false);
+    assert_eq!(doc["failure"]["close_code"], 1008);
+    assert_eq!(doc["failure"]["close_reason_bytes"], 14);
+    assert!(doc["estimated_input_tokens"].as_u64().unwrap() > 0);
+}
+
+#[test]
+fn smoke_flight_recorder_http_event_error_preserves_only_safe_code() {
+    let _guard = env_lock();
+    let config = TempDir::new().unwrap();
+    let state = TempDir::new().unwrap();
+    write_auth(config.path(), "codex");
+    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
+    let _state_env = EnvGuard::set("XDG_STATE_HOME", state.path());
+    let _windows_state_env = EnvGuard::set("LOCALAPPDATA", state.path());
+    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "http");
+    let directory = claude_code_proxy::paths::state_dir().join("diagnostics/codex-flight-recorder");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    runtime.block_on(async {
+        let upstream = spawn_http_upstream(|_| b"data: {\"type\":\"error\",\"status\":400,\"error\":{\"code\":\"context_length_exceeded\",\"message\":\"PRIVATE_CANARY\"}}\n\n".to_vec()).await;
+        let _url = EnvGuard::set("CCP_CODEX_BASE_URL",upstream);
+        let response = call_messages_body(json!({"model":"gpt-5.5","stream":true,"max_tokens":64,"messages":[{"role":"user","content":"PRIVATE_CANARY"}]})).await;
+        let body = axum::body::to_bytes(response.into_body(),usize::MAX).await.unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("event: error"));
+    });
+    drop(runtime);
+    let files: Vec<_> = std::fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(files.len(), 1);
+    let raw = std::fs::read_to_string(&files[0]).unwrap();
+    let doc: Value = serde_json::from_str(&raw).unwrap();
+    assert!(!raw.contains("PRIVATE_CANARY"));
+    assert_eq!(doc["failure"]["status"], 413);
+    let error = doc["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|event| event["type"] == "error")
+        .unwrap();
+    assert_eq!(error["upstream_status"], 400);
+    assert_eq!(error["error_code"], "context_length_exceeded");
+}
+
 static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+#[test]
+fn smoke_flight_recorder_startup_auth_error_survives_writer_failure() {
+    let _guard = env_lock();
+    // Deliberately no auth file; this fails locally without contacting OpenAI.
+    let config = TempDir::new().unwrap();
+    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
+    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "http");
+    for fail_write in [false, true] {
+        let state = TempDir::new().unwrap();
+        let _state_env = EnvGuard::set("XDG_STATE_HOME", state.path());
+        let _windows_state_env = EnvGuard::set("LOCALAPPDATA", state.path());
+        let directory =
+            claude_code_proxy::paths::state_dir().join("diagnostics/codex-flight-recorder");
+        if fail_write {
+            std::fs::create_dir_all(directory.parent().unwrap()).unwrap();
+            std::fs::write(&directory, "preserve-existing-file").unwrap();
+        }
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let response = call_messages_body(json!({"model":"gpt-5.5","stream":true,"max_tokens":64,"messages":[{"role":"user","content":"PRIVATE_CANARY"}]})).await;
+            let body = axum::body::to_bytes(response.into_body(),usize::MAX).await.unwrap();
+            assert_eq!(stream_error_payload(&body)["error"]["type"],"authentication_error");
+        });
+        drop(runtime);
+        if fail_write {
+            assert_eq!(
+                std::fs::read_to_string(directory).unwrap(),
+                "preserve-existing-file"
+            );
+        } else {
+            let file = std::fs::read_dir(directory)
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path();
+            let doc: Value = serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap();
+            assert_eq!(doc["failure"]["origin"], "auth");
+            assert_eq!(doc["failure"]["status"], 401);
+            assert!(!doc.to_string().contains("PRIVATE_CANARY"));
+        }
+    }
+}
 
 /// Serialize all env-var-mutating tests so they never run concurrently.
 fn env_lock() -> std::sync::MutexGuard<'static, ()> {
@@ -295,6 +443,7 @@ async fn spawn_retrying_truncated_http_upstream(
 #[allow(clippy::await_holding_lock)]
 async fn assert_codex_http_retries_structural_body_error(first_body: Vec<u8>) {
     let _guard = env_lock();
+    let _delay_guard = ZeroRetryDelayGuard::enable();
     clear_all_continuations_for_tests();
     let config = TempDir::new().unwrap();
     write_auth(config.path(), "codex");
@@ -342,6 +491,9 @@ async fn assert_codex_http_retries_structural_body_error(first_body: Vec<u8>) {
 #[allow(clippy::await_holding_lock)]
 async fn assert_codex_http_presemantic_retry(first_response: Vec<u8>) {
     let _guard = env_lock();
+    // This fixture checks event/replay semantics. EOF detection plus the real
+    // 1.5-second backoff can consume its diagnostic read boundary by itself.
+    let _delay_guard = ZeroRetryDelayGuard::enable();
     clear_all_continuations_for_tests();
     let config = TempDir::new().unwrap();
     write_auth(config.path(), "codex");
@@ -480,10 +632,11 @@ async fn spawn_websocket_credited_rate_limit_upstream() -> String {
     addr_str
 }
 
-async fn spawn_websocket_delayed_terminal_upstream() -> String {
+async fn spawn_websocket_delayed_terminal_upstream() -> (String, tokio::sync::oneshot::Sender<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let addr_str = format!("http://{addr}");
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
 
     tokio::spawn(async move {
         if let Ok((stream, _)) = listener.accept().await
@@ -498,7 +651,7 @@ async fn spawn_websocket_delayed_terminal_upstream() -> String {
                 let _ = ws.send(Message::Text(event.to_string())).await;
             }
 
-            tokio::time::sleep(Duration::from_secs(2)).await;
+            release_rx.await.unwrap();
 
             let terminal_events = [
                 r#"{"type":"response.output_item.done","output_index":0,"item":{"type":"message"}}"#,
@@ -510,7 +663,7 @@ async fn spawn_websocket_delayed_terminal_upstream() -> String {
         }
     });
 
-    addr_str
+    (addr_str, release_tx)
 }
 
 async fn spawn_websocket_error_upstream(message: &'static str) -> String {
@@ -1220,6 +1373,32 @@ async fn assert_usage_limit_response(response: Response) {
     assert_eq!(body["error"]["message"], "The usage limit has been reached");
 }
 
+fn stream_error_payload(bytes: &[u8]) -> Value {
+    let text = String::from_utf8_lossy(bytes);
+    assert!(text.starts_with("event: ping\n"), "{text}");
+    assert_eq!(text.matches("event: error\n").count(), 1, "{text}");
+    assert!(!text.contains("event: message_stop"), "{text}");
+    text.lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .filter_map(|data| serde_json::from_str::<Value>(data).ok())
+        .find(|payload| payload["type"] == "error")
+        .expect("stream must contain a structured error payload")
+}
+
+async fn assert_usage_limit_sse_response(response: Response) {
+    // After early headers, upstream failures use SSE. Buffered requests retain
+    // the HTTP header/status assertions in assert_usage_limit_response.
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "text/event-stream");
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let error = stream_error_payload(&bytes);
+    assert_eq!(error["error"]["type"], "rate_limit_error");
+    assert_eq!(
+        error["error"]["message"],
+        "The usage limit has been reached"
+    );
+}
+
 fn buffered_success_sse(text: &str) -> Vec<u8> {
     format!(
         concat!(
@@ -1262,8 +1441,8 @@ async fn smoke_codex_http_usage_limit_event_fast_fails_live_request() {
     }))
     .await;
 
+    assert_usage_limit_sse_response(response).await;
     assert_eq!(attempts.load(Ordering::SeqCst), 1);
-    assert_usage_limit_response(response).await;
 }
 
 #[allow(clippy::await_holding_lock)]
@@ -1309,8 +1488,8 @@ async fn smoke_codex_http_header_only_usage_limit_event_fast_fails_live_request(
     }))
     .await;
 
+    assert_usage_limit_sse_response(response).await;
     assert_eq!(attempts.load(Ordering::SeqCst), 1);
-    assert_usage_limit_response(response).await;
 }
 
 #[allow(clippy::await_holding_lock)]
@@ -1496,7 +1675,9 @@ async fn smoke_codex_http_empty_completions_exhaust_to_service_unavailable() {
     let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "http");
 
     let response = call_messages("gpt-5.5").await;
+    assert_eq!(response.headers().get("x-should-retry").unwrap(), "false");
     let status = response.status();
+    let should_retry = response.headers().get("x-should-retry").cloned();
     let body = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
@@ -1507,6 +1688,11 @@ async fn smoke_codex_http_empty_completions_exhaust_to_service_unavailable() {
         StatusCode::SERVICE_UNAVAILABLE,
         "exhausted empty completions must surface an explicit error: {body_text}"
     );
+    assert_eq!(
+        should_retry.as_ref().and_then(|v| v.to_str().ok()),
+        Some("false"),
+        "the proxy already retried; the client must not multiply it"
+    );
     assert!(
         body_text.contains("Codex completed without producing output"),
         "unexpected exhaustion body: {body_text}"
@@ -1514,8 +1700,8 @@ async fn smoke_codex_http_empty_completions_exhaust_to_service_unavailable() {
     // Initial attempt plus MAX_EMPTY_COMPLETION_RETRIES retries.
     assert_eq!(
         attempts.load(std::sync::atomic::Ordering::SeqCst),
-        11,
-        "retry loop must stay bounded"
+        3,
+        "empty responses must stop after two retries"
     );
 }
 
@@ -1627,13 +1813,200 @@ async fn smoke_codex_http_server_compaction_fast_fails_usage_limit() {
             {"role":"user","content":[
                 {"type":"tool_result","tool_use_id":"tool-1","content":"result"},
                 {"type":"text","text":"CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.\n\nYour task is to create a detailed summary of the conversation so far, paying close attention to the user's explicit requests."}
-            ]}
+            ]},
+            {"role":"assistant","content":"context appended after the internal compact prompt"}
         ]
     }))
     .await;
 
     assert_eq!(attempts.load(Ordering::SeqCst), 1);
     assert_usage_limit_response(response).await;
+    clear_all_compactions_for_tests();
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn smoke_streaming_websocket_headers_precede_blocked_output() {
+    let _guard = env_lock();
+    clear_codex_websocket_pool_for_tests();
+    let config = TempDir::new().unwrap();
+    write_auth(config.path(), "codex");
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let requests = Arc::new(AtomicUsize::new(0));
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn({
+        let requests = requests.clone();
+        async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+            let request: Value =
+                serde_json::from_str(&ws.next().await.unwrap().unwrap().into_text().unwrap())
+                    .unwrap();
+            assert_eq!(request["type"], "response.create");
+            assert_eq!(request["model"], "gpt-6.1-sol");
+            requests.fetch_add(1, Ordering::SeqCst);
+            entered_tx.send(()).unwrap();
+            release_rx.await.unwrap();
+            for event in [
+                json!({"type":"response.output_item.added", "output_index":0,
+                    "item":{"type":"message", "id":"msg_delayed"}}),
+                json!({"type":"response.output_text.delta", "output_index":0,
+                    "delta":"delayed websocket output"}),
+                json!({"type":"response.completed", "response":{"id":"resp_delayed",
+                    "usage":{"input_tokens":5,"output_tokens":3}}}),
+            ] {
+                ws.send(Message::Text(event.to_string())).await.unwrap();
+            }
+        }
+    });
+    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", upstream);
+    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "websocket");
+    use futures_util::FutureExt;
+    let response = call_messages_body(json!({
+        "model":"gpt-6.1-sol", "max_tokens":64, "stream":true,
+        "messages":[{"role":"user","content":"hello"}]
+    }))
+    .now_or_never()
+    .expect("ordinary streaming headers must not wait for upstream output");
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body();
+    let first = body.frame().await.unwrap().unwrap().into_data().unwrap();
+    assert_eq!(
+        first.as_ref(),
+        b"event: ping\ndata: {\"type\":\"ping\"}\n\n"
+    );
+    tokio::select! {
+        entered = entered_rx => entered.unwrap(),
+        _ = body.frame() => panic!("no model output is available before release"),
+    }
+    release_tx.send(()).unwrap();
+    let rest = body.collect().await.unwrap().to_bytes();
+    let rest = String::from_utf8_lossy(&rest);
+    assert_eq!(rest.matches("delayed websocket output").count(), 1);
+    assert_eq!(rest.matches("event: message_stop").count(), 1);
+    assert!(!rest.contains("event: error"), "{rest}");
+    assert_eq!(requests.load(Ordering::SeqCst), 1);
+    server.await.unwrap();
+    clear_codex_websocket_pool_for_tests();
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn smoke_streaming_websocket_disconnect_cancels_blocked_output() {
+    let _guard = env_lock();
+    clear_codex_websocket_pool_for_tests();
+    let config = TempDir::new().unwrap();
+    write_auth(config.path(), "codex");
+    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+    let (closed_tx, closed_rx) = tokio::sync::oneshot::channel();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream = format!("http://{}", listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut ws = tokio_tungstenite::accept_async(socket).await.unwrap();
+        let request = ws.next().await.unwrap().unwrap();
+        assert!(request.is_text());
+        entered_tx.send(()).unwrap();
+        while let Some(frame) = ws.next().await {
+            match frame {
+                Ok(Message::Close(_)) | Err(_) => break,
+                Ok(Message::Ping(payload)) => {
+                    let _ = ws.send(Message::Pong(payload)).await;
+                }
+                other => panic!("cancelled request must not be replayed: {other:?}"),
+            }
+        }
+        closed_tx.send(()).unwrap();
+    });
+    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", upstream);
+    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "websocket");
+    let response = call_messages_body(json!({
+        "model":"gpt-6.1-sol", "max_tokens":64, "stream":true,
+        "messages":[{"role":"user","content":"hello"}]
+    }))
+    .await;
+    let mut body = response.into_body();
+    let ping = body.frame().await.unwrap().unwrap().into_data().unwrap();
+    assert!(String::from_utf8_lossy(&ping).contains("event: ping"));
+    tokio::select! {
+        entered = entered_rx => entered.unwrap(),
+        _ = body.frame() => panic!("upstream output is deliberately blocked"),
+    }
+    drop(body);
+    tokio::time::timeout(Duration::from_secs(3), closed_rx)
+        .await
+        .expect("disconnect must close the pending upstream socket")
+        .unwrap();
+    server.await.unwrap();
+    clear_codex_websocket_pool_for_tests();
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn smoke_streaming_compaction_headers_precede_blocked_native_compaction() {
+    let _guard = env_lock();
+    clear_all_compactions_for_tests();
+    let config = TempDir::new().unwrap();
+    write_auth(config.path(), "codex");
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let upstream = format!("http://{}", listener.local_addr().unwrap());
+    let router = axum::Router::new().fallback({
+        let entered = entered.clone();
+        let release = release.clone();
+        move |body: String| {
+            let entered = entered.clone();
+            let release = release.clone();
+            async move {
+                let body: Value = serde_json::from_str(&body).unwrap();
+                let compact = body["input"].as_array().unwrap().last().unwrap()["type"] == "compaction_trigger";
+                let data = if compact {
+                    entered.notify_one();
+                    release.notified().await;
+                    concat!(
+                        "data: {\"type\":\"response.output_item.done\",\"output_index\":0,\"item\":{\"type\":\"compaction\",\"encrypted_content\":\"opaque-history\"}}\n\n",
+                        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_compact\"}}\n\n"
+                    )
+                } else {
+                    concat!(
+                        "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"message\",\"id\":\"msg_summary\"}}\n\n",
+                        "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"delta\":\"portable summary with sufficient detail to anchor this compacted conversation\"}\n\n",
+                        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_summary\",\"usage\":{\"input_tokens\":100,\"output_tokens\":12}}}\n\n"
+                    )
+                };
+                ([(http::header::CONTENT_TYPE, "text/event-stream")], data)
+            }
+        }
+    });
+    let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", upstream);
+    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "http");
+    let _compaction_env = EnvGuard::set("CCP_CODEX_SERVER_COMPACTION", "1");
+    use futures_util::FutureExt;
+    let response = call_messages_body(json!({
+        "model": "gpt-5.6-sol", "max_tokens": 64, "stream": true,
+        "system": "You are a helpful AI assistant tasked with summarizing conversations.",
+        "messages": [{"role": "user", "content": "old conversation"}]
+    }))
+    .now_or_never()
+    .expect("headers must not wait for upstream compaction");
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut body = response.into_body();
+    let first = body.frame().await.unwrap().unwrap().into_data().unwrap();
+    assert!(String::from_utf8_lossy(&first).contains("event: ping"));
+    let summary = tokio::spawn(async move { body.collect().await.unwrap().to_bytes() });
+    entered.notified().await;
+    release.notify_one();
+    let data = summary.await.unwrap();
+    assert!(String::from_utf8_lossy(&data).contains("event: message_stop"));
+    assert!(String::from_utf8_lossy(&data).contains("portable summary"));
+    server.abort();
     clear_all_compactions_for_tests();
 }
 
@@ -1691,13 +2064,15 @@ async fn smoke_codex_http_server_compaction_replays_native_history() {
         "model": "gpt-5.6-sol",
         "max_tokens": 64,
         "system": "You are Claude Code.",
+        "tools": [{"name":"Read","description":"read source","input_schema":{"type":"object","properties":{}}}],
         "messages": [
             {"role":"user","content":"old conversation"},
             {"role":"assistant","content":[{"type":"tool_use","id":"tool-1","name":"Read","input":{}}]},
             {"role":"user","content":[
                 {"type":"tool_result","tool_use_id":"tool-1","content":"result"},
                 {"type":"text","text":"CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.\n\nYour task is to create a detailed summary of the conversation so far, paying close attention to the user's explicit requests."}
-            ]}
+            ]},
+            {"role":"assistant","content":"context appended after the internal compact prompt"}
         ]
     }))
     .await;
@@ -1708,7 +2083,7 @@ async fn smoke_codex_http_server_compaction_replays_native_history() {
         "max_tokens": 64,
         "system": "current instructions",
         "messages": [
-            {"role":"user","content":"<summary>portable summary with enough detail to anchor the compacted conversation</summary>"},
+            {"role":"user","content":"This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\nSummary:\nportable summary with enough detail to anchor the compacted conversation"},
             {"role":"user","content":"continue"}
         ]
     }))
@@ -1740,16 +2115,85 @@ async fn smoke_codex_http_server_compaction_replays_native_history() {
             .to_string()
             .contains("Your task is to create a detailed summary")
     );
+    assert_eq!(requests[1]["tool_choice"], "none");
+    assert!(requests[1]["tools"].is_null());
+    assert!(
+        !requests[1]["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["type"] == "additional_tools")
+    );
     assert!(!requests[1].to_string().contains("opaque-history"));
+    assert!(
+        requests[1]
+            .to_string()
+            .contains("internal context-maintenance request")
+    );
     let replay = requests[2]["input"].as_array().unwrap();
     assert!(requests[2].get("client_metadata").is_some());
     assert!(requests[2].to_string().contains("current instructions"));
+    assert!(
+        requests[2]
+            .to_string()
+            .contains("model-generated historical context")
+    );
+    assert!(
+        !requests[2]
+            .to_string()
+            .contains("CRITICAL: Respond with TEXT ONLY")
+    );
     let compaction = replay
         .iter()
         .find(|item| item["type"] == "compaction")
         .unwrap();
     assert_eq!(compaction["encrypted_content"], "opaque-history");
     assert!(replay.iter().any(|item| item["role"] == "user"));
+    clear_all_compactions_for_tests();
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn smoke_codex_compaction_provenance_portable_fallback_keeps_pause() {
+    let _guard = env_lock();
+    clear_all_compactions_for_tests();
+    let config = TempDir::new().unwrap();
+    write_auth(config.path(), "codex");
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let upstream = spawn_http_upstream({
+        let captured = captured.clone();
+        move |body: Value| {
+            captured.lock().unwrap().push(body);
+            buffered_success_sse("Paused as genuinely requested.")
+        }
+    })
+    .await;
+    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
+    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "http");
+    let _compaction_env = EnvGuard::set("CCP_CODEX_SERVER_COMPACTION", "0");
+    let summary = "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\nSummary:\nCurrent genuine request: TEXT ONLY detailed summary; no tools.\nPending implementation: inspect the feature.";
+    let pause = "Pause implementation now and only tell me its status. Do not call tools.";
+    let response = call_messages_body(json!({
+        "model":"gpt-5.6-sol", "max_tokens":64, "system":"current instructions",
+        "messages":[{"role":"user","content":summary},{"role":"user","content":pause}],
+        "tools":[{"name":"InspectImplementation","description":"inspect","input_schema":{"type":"object","properties":{}}}]
+    })).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let requests = captured.lock().unwrap();
+    assert_eq!(requests.len(), 1);
+    let sent = requests[0].to_string();
+    assert!(sent.contains("model-generated historical context"));
+    assert!(sent.contains("genuine user pause"));
+    assert!(sent.contains("InspectImplementation"));
+    assert!(!sent.contains("compaction_trigger"));
+    let input = requests[0]["input"].as_array().unwrap();
+    assert!(
+        input
+            .iter()
+            .any(|item| item["role"] == "user" && item["content"][0]["text"] == summary)
+    );
+    assert_eq!(input.last().unwrap()["content"][0]["text"], pause);
     clear_all_compactions_for_tests();
 }
 
@@ -2024,9 +2468,17 @@ async fn smoke_codex_http_stream_returns_before_upstream_completion() {
         .into_data()
         .unwrap();
     let first = String::from_utf8(first.to_vec()).unwrap();
-    assert!(first.contains("event: message_start"));
     assert!(first.contains("event: ping"));
-    assert!(first.contains("incremental ok"));
+    let mut early = Vec::new();
+    tokio::time::timeout(Duration::from_secs(3), async {
+        while !String::from_utf8_lossy(&early).contains("incremental ok") {
+            early.extend_from_slice(&body.frame().await.unwrap().unwrap().into_data().unwrap());
+        }
+    })
+    .await
+    .expect("text must stream before the terminal event is released");
+    assert!(String::from_utf8_lossy(&early).contains("event: message_start"));
+    assert!(!String::from_utf8_lossy(&early).contains("event: message_stop"));
 
     release.notify_one();
     let rest = axum::body::to_bytes(body, usize::MAX).await.unwrap();
@@ -2307,8 +2759,8 @@ async fn smoke_codex_http_usage_limit_status_fast_fails_live_request() {
     }))
     .await;
 
+    assert_usage_limit_sse_response(response).await;
     assert_eq!(attempts.load(Ordering::SeqCst), 1);
-    assert_usage_limit_response(response).await;
 }
 
 #[allow(clippy::await_holding_lock)]
@@ -2352,7 +2804,9 @@ async fn smoke_codex_http_bounds_initial_status_retries() {
     }))
     .await;
 
-    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(stream_error_payload(&bytes)["error"]["type"], "api_error");
     assert_eq!(attempts.load(Ordering::SeqCst), 4);
 }
 
@@ -2458,7 +2912,7 @@ async fn smoke_codex_http_stops_after_retry_limit() {
     }))
     .await;
 
-    assert_eq!(response.status().as_u16(), 529);
+    assert_eq!(response.status(), StatusCode::OK);
     let body = tokio::time::timeout(
         Duration::from_secs(2),
         axum::body::to_bytes(response.into_body(), usize::MAX),
@@ -2467,6 +2921,10 @@ async fn smoke_codex_http_stops_after_retry_limit() {
     .expect("exhausted stream must terminate")
     .unwrap();
     let text = String::from_utf8_lossy(&body);
+    assert_eq!(
+        stream_error_payload(&body)["error"]["type"],
+        "overloaded_error"
+    );
     assert_eq!(attempts.load(Ordering::SeqCst), 4, "stream body: {text}");
     assert!(
         text.contains("overloaded until retry limit"),
@@ -2504,12 +2962,14 @@ async fn smoke_codex_http_cancels_retry_backoff_when_request_drops() {
     let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
     let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
     let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", "http");
-    let request = tokio::spawn(call_messages_body(json!({
+    let response = call_messages_body(json!({
         "model": "gpt-5.5",
         "max_tokens": 64,
         "stream": true,
         "messages": [{"role":"user","content":"hello"}]
-    })));
+    }))
+    .await;
+    let request = tokio::spawn(async move { response.into_body().collect().await });
     tokio::time::timeout(Duration::from_secs(5), async {
         while attempts.load(Ordering::SeqCst) == 0 {
             tokio::task::yield_now().await;
@@ -2677,9 +3137,9 @@ async fn smoke_codex_auto_fallback_usage_limit_fast_fails_live_request() {
     }))
     .await;
 
+    assert_usage_limit_sse_response(response).await;
     assert_eq!(websocket_attempts.load(Ordering::SeqCst), 1);
     assert_eq!(http_attempts.load(Ordering::SeqCst), 1);
-    assert_usage_limit_response(response).await;
     clear_codex_websocket_pool_for_tests();
 }
 
@@ -2758,8 +3218,8 @@ async fn smoke_codex_websocket_usage_limit_fast_fails_request() {
     }))
     .await;
 
+    assert_usage_limit_sse_response(response).await;
     assert_eq!(attempts.load(Ordering::SeqCst), 1);
-    assert_usage_limit_response(response).await;
     clear_codex_websocket_pool_for_tests();
 }
 
@@ -2837,7 +3297,7 @@ async fn smoke_codex_websocket_stream_returns_delta_before_terminal() {
     write_auth(config.path(), "codex");
     clear_codex_websocket_pool_for_tests();
 
-    let upstream = spawn_websocket_delayed_terminal_upstream().await;
+    let (upstream, release) = spawn_websocket_delayed_terminal_upstream().await;
 
     let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
     let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
@@ -2858,7 +3318,7 @@ async fn smoke_codex_websocket_stream_returns_delta_before_terminal() {
 
     let mut body = response.into_body();
     let mut collected = Vec::new();
-    let read = tokio::time::timeout(Duration::from_millis(500), async {
+    let read = tokio::time::timeout(Duration::from_secs(3), async {
         while !String::from_utf8_lossy(&collected).contains("text_delta") {
             let Some(frame) = body.frame().await else {
                 break;
@@ -2881,6 +3341,9 @@ async fn smoke_codex_websocket_stream_returns_delta_before_terminal() {
         !text.contains("message_stop"),
         "stream finished too early: {text}"
     );
+    release.send(()).unwrap();
+    let rest = body.collect().await.unwrap().to_bytes();
+    assert!(String::from_utf8_lossy(&rest).contains("event: message_stop"));
 }
 
 #[allow(clippy::await_holding_lock)]
@@ -2911,11 +3374,11 @@ async fn smoke_codex_websocket_context_window_error_requests_compaction() {
 
     assert_eq!(
         status,
-        StatusCode::PAYLOAD_TOO_LARGE,
+        StatusCode::OK,
         "response body: {}",
         String::from_utf8_lossy(&body)
     );
-    let value: Value = serde_json::from_slice(&body).unwrap();
+    let value = stream_error_payload(&body);
     assert_eq!(value["type"], "error");
     assert_eq!(value["error"]["type"], "request_too_large");
     assert_eq!(value["error"]["message"], "input exceeds context window");
@@ -3246,22 +3709,151 @@ async fn smoke_codex_websocket_empty_completions_exhaust_to_service_unavailable(
 
     assert_eq!(
         status,
-        StatusCode::SERVICE_UNAVAILABLE,
+        StatusCode::OK,
         "exhausted empty completions must surface an explicit error: {body_text}"
     );
+    assert_eq!(stream_error_payload(&body)["error"]["type"], "api_error");
     assert!(
         body_text.contains("Codex completed without producing output"),
         "unexpected exhaustion body: {body_text}"
     );
-    // Initial attempt plus MAX_RETRYABLE_LIVE_STREAM_RETRIES full-context retries.
+    // Initial attempt plus two empty-completion retries.
     assert_eq!(
         request_count.load(std::sync::atomic::Ordering::SeqCst),
-        11,
-        "retry loop must stay bounded"
+        3,
+        "empty responses must stop after two retries"
     );
 
     clear_all_continuations_for_tests();
     clear_codex_websocket_pool_for_tests();
+}
+
+fn noop_wakeup_request(stream: bool) -> Value {
+    json!({
+        "model": "gpt-6.1-sol",
+        "max_tokens": 64,
+        "stream": stream,
+        "tools": [{"name":"ScheduleWakeup", "input_schema":{
+            "type":"object", "properties":{"noop":{"type":"boolean"}}
+        }}],
+        "messages": [
+            {"role":"user", "content":"Schedule the next checkpoint, then wait."},
+            {"role":"assistant", "content":[{
+                "type":"tool_use", "id":"call_wakeup", "name":"ScheduleWakeup",
+                "input":{"noop":true,"delaySeconds":1200}
+            }]},
+            {"role":"user", "content":[{
+                "type":"tool_result", "tool_use_id":"call_wakeup",
+                "content":"Next wakeup scheduled for 16:06:00 (in 1243s). Nothing more to do this turn — the harness re-invokes you when the wakeup fires or a task-notification arrives."
+            }]}
+        ]
+    })
+}
+
+#[allow(clippy::await_holding_lock)]
+async fn check_noop_wakeup_completion(
+    transport: &str,
+    stream: bool,
+    request: Value,
+    accepted: bool,
+) {
+    let _guard = env_lock();
+    let _delay_guard = ZeroRetryDelayGuard::enable();
+    let config = TempDir::new().unwrap();
+    let _state_env = EnvGuard::set("XDG_STATE_HOME", config.path());
+    write_auth(config.path(), "codex");
+    clear_all_continuations_for_tests();
+    clear_codex_websocket_pool_for_tests();
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let upstream = if transport == "websocket" {
+        spawn_websocket_always_empty_completion_upstream(attempts.clone()).await
+    } else {
+        let attempts = attempts.clone();
+        spawn_http_upstream(move |_body: Value| {
+            attempts.fetch_add(1, Ordering::SeqCst);
+            empty_completion_sse()
+        })
+        .await
+    };
+    let _config_env = EnvGuard::set("CCP_CONFIG_DIR", config.path());
+    let _base_url_env = EnvGuard::set("CCP_CODEX_BASE_URL", &upstream);
+    let _transport_env = EnvGuard::set("CCP_CODEX_TRANSPORT", transport);
+    let response = call_messages_body(request).await;
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = String::from_utf8_lossy(&body);
+    if !accepted {
+        assert!(
+            text.contains("Codex completed without producing output"),
+            "{text}"
+        );
+        if stream {
+            assert!(text.contains("event: error"), "{text}");
+            assert!(!text.contains("event: message_stop"), "{text}");
+        } else {
+            assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{text}");
+        }
+    } else if stream {
+        assert_eq!(status, StatusCode::OK, "{text}");
+        assert!(!text.contains("event: error"), "{text}");
+        assert_eq!(text.matches("event: message_stop").count(), 1, "{text}");
+        assert!(text.contains("\"stop_reason\":\"end_turn\""), "{text}");
+        assert!(
+            !text.contains("event: content_block_start"),
+            "must not fabricate content: {text}"
+        );
+    } else {
+        assert_eq!(status, StatusCode::OK, "{text}");
+        let response: Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(response["stop_reason"], "end_turn");
+        assert_eq!(response["content"], json!([]));
+    }
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        if accepted { 1 } else { 3 },
+        "only acknowledged no-op silence may skip retries"
+    );
+    clear_all_continuations_for_tests();
+    clear_codex_websocket_pool_for_tests();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn smoke_codex_noop_wakeup_websocket_stream() {
+    check_noop_wakeup_completion("websocket", true, noop_wakeup_request(true), true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn smoke_codex_noop_wakeup_websocket_buffered() {
+    check_noop_wakeup_completion("websocket", false, noop_wakeup_request(false), true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn smoke_codex_noop_wakeup_http_stream() {
+    check_noop_wakeup_completion("http", true, noop_wakeup_request(true), true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn smoke_codex_noop_wakeup_http_buffered() {
+    check_noop_wakeup_completion("http", false, noop_wakeup_request(false), true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn smoke_codex_noop_wakeup_negative_controls() {
+    for stream in [false, true] {
+        for (pointer, value) in [
+            ("/messages/2/content/0/is_error", json!(true)),
+            ("/messages/1/content/0/input/noop", json!(false)),
+            ("/messages/1/content/0/name", json!("Read")),
+        ] {
+            let mut request = noop_wakeup_request(stream);
+            // is_error is optional in the real request; insert it for this control.
+            request["messages"][2]["content"][0]["is_error"] = json!(false);
+            *request.pointer_mut(pointer).unwrap() = value;
+            check_noop_wakeup_completion("http", stream, request, false).await;
+        }
+    }
 }
 
 #[allow(clippy::await_holding_lock)]
