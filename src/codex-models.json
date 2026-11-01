@@ -12,6 +12,7 @@
     {"id": "gpt-6-astra", "responsesLite": true},
     {"id": "gpt-6-luna", "responsesLite": true},
     {"id": "gpt-6-sol", "responsesLite": true},
-    {"id": "gpt-6.1-sol", "responsesLite": true}
+    {"id": "gpt-6.1-sol", "responsesLite": true},
+    {"id": "gpt-6.1-terra", "responsesLite": true}
   ]
 }

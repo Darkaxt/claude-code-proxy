@@ -146,6 +146,25 @@ pub fn uses_responses_lite(model: &str) -> bool {
     codex_models::catalog().get(model).copied().unwrap_or(false)
 }
 
+/// Only known full-lane siblings opt out of Lite; explicit catalog metadata
+/// remains authoritative for other models and Luna remains on Lite.
+pub fn uses_responses_lite_with_full_lane(model: &str, full_lane: bool) -> bool {
+    if full_lane
+        && matches!(
+            model,
+            "gpt-5.6-sol"
+                | "gpt-5.6-terra"
+                | "gpt-6-astra"
+                | "gpt-6-sol"
+                | "gpt-6.1-sol"
+                | "gpt-6.1-terra"
+        )
+    {
+        return false;
+    }
+    uses_responses_lite(model)
+}
+
 /// Luna models exist only behind the Responses Lite lane; the full
 /// Responses API resolves them to a `-free` variant and returns 404 (Model not
 /// found gpt-5.6-luna-free-...). Hosted web_search requests must run on the
@@ -172,6 +191,29 @@ pub fn is_valid_model_for_codex(model: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn full_lane_covers_known_siblings_but_preserves_luna_and_other_catalog_metadata() {
+        for model in [
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-6-astra",
+            "gpt-6-sol",
+            "gpt-6.1-sol",
+            "gpt-6.1-terra",
+        ] {
+            assert!(uses_responses_lite_with_full_lane(model, false), "{model}");
+            assert!(!uses_responses_lite_with_full_lane(model, true), "{model}");
+        }
+        for model in ["gpt-5.6-luna", "gpt-6-luna"] {
+            assert!(uses_responses_lite_with_full_lane(model, true), "{model}");
+        }
+        assert!(!uses_responses_lite_with_full_lane("gpt-5.4", true));
+        assert!(!uses_responses_lite_with_full_lane(
+            "gpt-unregistered",
+            true
+        ));
+    }
 
     #[test]
     fn gpt_6_1_sol_is_allowed_and_uses_responses_lite() {
