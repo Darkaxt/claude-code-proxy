@@ -1,5 +1,83 @@
 # Windows scheduled updater
 
+## Managed native Claude client
+
+The client stack is the official Windows x64 Claude executable, a pinned published
+`skrabe/tweakcc-fixed` package, and a pinned `skrabe/lobotomized-claude-code` prompt
+revision. They are maintained together by the existing daily ClaudeGPT automation.
+Requirements and acceptance live in `docs/claude-client-customization-spec.md`.
+The proxy and client have independent candidates; updating one does not rebuild
+or restart an unchanged other component.
+
+Private state is `D:/Tools/claudegpt-maintenance/client`: `active.json` identifies
+the installed tuple and receipts; each `releases/<tuple>` retains the exact vendor
+input, package lock, prompt source/profile/adaptations, native payload readback,
+verification and frozen maintenance scripts. Each `run-<date>` retains the scoped
+manifest, activation receipt, known-good rollback and real-request evidence.
+Inspect these records before preparing another candidate. Preserve local edits.
+
+Use `prepare-client.ps1` with explicit release, D: native/npm scratch, prompt repo
+and commit, CLI version and patcher version. It installs exact npm packages with
+`--ignore-scripts`, checks declared CLI support and the pristine Anthropic Windows
+signature, and copies ordinary prompt files. No WSL or symlinks are needed.
+Use the patcher's declared support plus reviewed prompt commits and actual checks;
+a README badge or a newer unsupported CLI release is insufficient compatibility
+evidence.
+
+Use `check-client-candidate.ps1 -Mode Preflight` and inspect the complete log;
+`review-client-preflight.mjs` records every finding. The cross-platform catalogue
+can report missing/nonunique native Windows sites even for unedited stubs. These
+are not a green preflight: retain and classify them and exclude uncertifiable
+named sites. `apply-client-profile.mjs` honors frontmatter/built-in shadows and
+retains the obsolete overlapping 2.1.138 inline loop files outside the active
+profile, using the current named variable-mapped prompts. It invokes the published
+community CLI unchanged with prompt IDs in-process (Windows argv is too short for
+the catalogue), plus the selected summary and read fixes. Experimental routers,
+refusal fallback, browser integration and permission bypass features remain off.
+
+Use `check-client-candidate.ps1 -Mode Apply`, inspect its exact outcome, then
+`-Mode Startup`, `inspect-client-payload.mjs` and `probe-client.mjs`. Payload
+inspection requires exact equality with the community tool's saved patched JS,
+cleared bytecode and actual replacement samples. The benign probe disables tools,
+MCP and hooks for that invocation, persists no conversation and never retries;
+the configured provider/model/effort are retained. If authentication expires,
+request the owner's existing proxy login and preserve the failed evidence.
+
+On Windows, patcher 2.9.22 can finish writing the candidate but fail unlinking its
+temporary executable in its final cleanup. Preserve that original EBUSY failure.
+Do not rerun/rebuild automatically: observe process completion, inspect the exact
+failure site and output identities, independently verify the unchanged native
+payload/startup/request, and clean attributed scratch transactionally.
+`finalize-client-candidate.ps1` accepts only ordinary successful application or
+that narrowly classified postwrite cleanup failure with the independent checks;
+other failures remain blockers. It creates a hash-bound private verification and
+deployment manifest, retaining settings privately. Do not publish private state.
+
+`deploy-client.ps1` requires PowerShell 7.4+. Its default `Validate` changes no live
+file. `-Mode Apply` refuses running clients, changed inputs or protected files,
+checks that settings change only adds `DISABLE_AUTOUPDATER=1`, saves rollback,
+atomically replaces the executable/settings, verifies hashes/version and makes
+one installed benign request. Failure restores and verifies the previous pair.
+`-Mode Verify` independently rechecks the installed pair; `-Mode Restore` restores
+the receipt-bound previous pair at idle. Use the frozen release copy with its
+exact private manifest for recovery. Never stop user clients to obtain idle or
+replace the fork proxy as part of a client update.
+
+`test-deploy-client.ps1 -ProductionManifest <private manifest> -FixtureRoot <new
+exact task scratch>` exercises read-only validation, real Windows executable
+activation, explicit restoration, and automatic restoration after a fictional
+post-activation probe failure. It makes no provider request and changes no live
+files. Preserve its concise result and clean scratch through transactional-cleanup
+after all consumers exit. Scripts and wrapper-only changes do not invalidate
+unchanged runtime verification; recheck affected behavior when it changes.
+
+Keep the one existing daily schedule and documented CLI background-updater disable
+setting. Create no separate auto-reapply hook or competing worker. A waiting
+candidate stays staged until client/continuation safety is clear. Preserve its
+rollback, receipts, credentials, histories and unrelated source changes.
+
+## Proxy updater
+
 `update-proxy.ps1` and `start-updater-hidden.vbs` mirror the installed maintenance
 scripts. The launcher remains hidden and propagates the worker's exit code.
 
