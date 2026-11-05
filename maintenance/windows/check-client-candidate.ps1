@@ -15,7 +15,7 @@ $env:DISABLE_AUTOUPDATER = '1'
 $env:TEMP = $ScratchDirectory
 $env:TMP = $ScratchDirectory
 if ($Mode -eq 'Preflight') {
-    & $m.node $m.tool --validate-system-prompts *> (Join-Path $ReleaseDirectory 'prompt-preflight.log')
+    & $m.node (Join-Path $PSScriptRoot 'preflight-client-profile.mjs') $ReleaseDirectory $ScratchDirectory *> (Join-Path $ReleaseDirectory 'prompt-preflight.log')
     $code = $LASTEXITCODE
     @{exitCode=$code;at=[DateTime]::UtcNow.ToString('o')} | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $ReleaseDirectory 'prompt-preflight-result.json')
     Write-Output "Prompt preflight exit: $code; inspect prompt-preflight.log"

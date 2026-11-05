@@ -22,6 +22,9 @@ for(const p of catalog.prompts) {
   const values=byId.get(p.id)??[]; values.push(original); byId.set(p.id,values);
 }
 const log=await fs.readFile(path.join(release,'prompt-preflight.log'),'utf8');
+const completion=log.match(/(\d+) finding\(s\): (\d+) error\(s\), (\d+) warning\(s\), (\d+) info\./);
+const clean=/^0 findings\.$/m.test(log);
+if (!completion && !clean) throw Error('Community preflight did not finish; inspect its original error instead of treating zero parsed findings as success');
 const findings=[];
 for(const line of log.split(/\r?\n/)) {
   const match=line.match(/^\[(cardinality|ownership|backtick-escape|raw-non-ascii)\] (\S+) \(site/);
@@ -36,6 +39,7 @@ for(const line of log.split(/\r?\n/)) {
   findings.push({kind,id,unchanged,bodyEmpty:body==='',line});
 }
 const changed=findings.filter(f=>!f.unchanged);
+if (Number(completion?.[1] ?? 0) !== findings.length) throw Error('Unparsed community findings; review the changed format before applying');
 const report={total:findings.length,unchanged:findings.filter(f=>f.unchanged).length,
   kinds:Object.fromEntries([...new Set(findings.map(f=>f.kind))].map(k=>[k,findings.filter(f=>f.kind===k).length])),
   changedOrUnresolved:changed,allFindings:findings};

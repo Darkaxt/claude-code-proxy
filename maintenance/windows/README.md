@@ -24,7 +24,7 @@ Use the patcher's declared support plus reviewed prompt commits and actual check
 a README badge or a newer unsupported CLI release is insufficient compatibility
 evidence.
 
-The managed `auth1` adaptation preserves durable task authorization for ordinary
+The managed `auth1`/`auth2` adaptations preserve durable task authorization for ordinary
 commits, pushes, releases and closure writes. `prepare-client.ps1` applies it
 before preflight; application rechecks it before patching. The reviewed community
 action-safety prompt is hash-bound, and unexpected source changes or profile edits
@@ -38,6 +38,19 @@ retain its `authorization-probe.json` in the release before finalization. It
 checks authorized push/evolving-payload continuity and confirmation for a new
 public destination or exceeded one-time scope, without writing shared state.
 This does not alter host permissions, provider enforcement or model routing.
+`auth2` supports the reviewed 2.1.318 community revision and retains its source/
+target inspection, credential and truthful-reporting contracts. `auth1` remains
+supported for the earlier 2.1.317 inputs. Unknown community hashes still refuse.
+Unmodified zero-identifier stock stubs containing literal interpolation syntax
+are retained under `profile-exclusions/pristine-literal-stubs`, with hashes in
+`literal-profile-exclusions.json`. Their native text remains unchanged. This
+avoids treating literal prose as a template in patcher 2.9.24; edited stubs refuse
+exclusion. A crashed or incompletely parsed preflight is never a zero-finding pass.
+Preflight uses the published CLI's explicit pristine-JS input, extracted with its
+public library from the hash-bound vendor binary into task scratch. This avoids
+implicit startup regenerating excluded stubs. Application still uses the unchanged
+published CLI with its explicit ID filter; native readback verifies those literal
+stock IDs were unselected.
 
 Use `check-client-candidate.ps1 -Mode Preflight` and inspect the complete log;
 `review-client-preflight.mjs` records every finding. The cross-platform catalogue

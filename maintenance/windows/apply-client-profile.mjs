@@ -5,12 +5,14 @@ import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { createRequire } from 'node:module';
 import { adaptClientAuthorization } from './adapt-client-authorization.mjs';
+import { excludePristineLiterals } from './exclude-client-pristine-literals.mjs';
 
 const release = path.resolve(process.argv[2] ?? '');
 const manifest = JSON.parse(await fs.readFile(path.join(release, 'candidate.json'), 'utf8'));
 if (manifest.schema !== 'claudegpt.client_candidate.v1') throw new Error('Invalid candidate');
 // Refuse intervening user edits or unreviewed upstream drift before patching.
 await adaptClientAuthorization(release);
+await excludePristineLiterals(release);
 process.env.TWEAKCC_CONFIG_DIR = manifest.profile;
 process.env.TWEAKCC_CC_INSTALLATION_PATH = manifest.candidateBinary;
 process.env.DISABLE_AUTOUPDATER = '1';

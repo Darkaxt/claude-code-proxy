@@ -45,12 +45,12 @@ $m.candidateSha256=$binaryHash
 Save $m (Join-Path $ReleaseDirectory 'candidate.json')
 $bundle=Join-Path $ReleaseDirectory 'maintenance'
 New-Item -ItemType Directory -Path $bundle -Force | Out-Null
-foreach($file in @('prepare-client.ps1','check-client-candidate.ps1','apply-client-profile.mjs','adapt-client-authorization.mjs','test-adapt-client-authorization.mjs','inspect-client-payload.mjs','review-client-preflight.mjs','probe-client.mjs','probe-client-authorization.mjs','deploy-client.ps1','finalize-client-candidate.ps1')) {
+foreach($file in @('prepare-client.ps1','check-client-candidate.ps1','preflight-client-profile.mjs','apply-client-profile.mjs','adapt-client-authorization.mjs','test-adapt-client-authorization.mjs','exclude-client-pristine-literals.mjs','test-client-pristine-literals.mjs','test-client-preflight-review.mjs','inspect-client-payload.mjs','review-client-preflight.mjs','probe-client.mjs','probe-client-authorization.mjs','deploy-client.ps1','finalize-client-candidate.ps1')) {
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot $file) -Destination (Join-Path $bundle $file)
 }
 $overrideBundle=Join-Path $bundle 'client-overrides'
 New-Item -ItemType Directory -Path $overrideBundle -Force | Out-Null
-Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'client-overrides/system-prompt-action-safety-and-truthful-reporting.md') -Destination (Join-Path $overrideBundle 'system-prompt-action-safety-and-truthful-reporting.md')
+foreach($override in Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'client-overrides') -Filter '*.md' -File){Copy-Item -LiteralPath $override.FullName -Destination (Join-Path $overrideBundle $override.Name)}
 $settings=Get-Content -LiteralPath $SettingsPath -Raw | ConvertFrom-Json -AsHashtable
 $updaterAlreadyDisabled=$settings.ContainsKey('env') -and $settings.env.DISABLE_AUTOUPDATER -eq '1'
 if(-not $settings.ContainsKey('env')) {$settings.env=@{}}
