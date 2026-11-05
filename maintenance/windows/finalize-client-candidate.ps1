@@ -52,10 +52,11 @@ $overrideBundle=Join-Path $bundle 'client-overrides'
 New-Item -ItemType Directory -Path $overrideBundle -Force | Out-Null
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'client-overrides/system-prompt-action-safety-and-truthful-reporting.md') -Destination (Join-Path $overrideBundle 'system-prompt-action-safety-and-truthful-reporting.md')
 $settings=Get-Content -LiteralPath $SettingsPath -Raw | ConvertFrom-Json -AsHashtable
+$updaterAlreadyDisabled=$settings.ContainsKey('env') -and $settings.env.DISABLE_AUTOUPDATER -eq '1'
 if(-not $settings.ContainsKey('env')) {$settings.env=@{}}
 $settings.env.DISABLE_AUTOUPDATER='1'
 $updated=Join-Path $ReleaseDirectory 'settings-managed.json'
-Save $settings $updated
+if($updaterAlreadyDisabled){Copy-Item -LiteralPath $SettingsPath -Destination $updated}else{Save $settings $updated}
 $protected=@()
 foreach($p in $ProtectedPaths) {
     if(Test-Path -LiteralPath $p -PathType Leaf) {$protected+=@{path=$p;sha256=(Hash $p)}}

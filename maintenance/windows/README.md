@@ -67,6 +67,10 @@ payload/startup/request, and clean attributed scratch transactionally.
 that narrowly classified postwrite cleanup failure with the independent checks;
 other failures remain blockers. It creates a hash-bound private verification and
 deployment manifest, retaining settings privately. Do not publish private state.
+If the updater guard is already enabled, finalization copies settings byte for
+byte instead of reserializing them. `test-client-settings-preservation.ps1`
+uses a qualified release and its probe receipt as read-only evidence, with a new
+exact fixture root, to verify byte preservation and the one-flag setup case.
 
 `deploy-client.ps1` requires PowerShell 7.4+. Its default `Validate` changes no live
 file. `-Mode Apply` refuses running clients, changed inputs or protected files,
