@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { pathToFileURL } from 'node:url';
+import { body, digest, overrideUrl } from './adapt-client-authorization.mjs';
 
 const release = path.resolve(process.argv[2]);
 const m = JSON.parse(await fs.readFile(path.join(release, 'candidate.json'), 'utf8'));
@@ -12,6 +13,8 @@ const { readContent } = await import(pathToFileURL(libPath).href);
 const { content, clearBytecode } = await readContent({ path:m.candidateBinary, version:m.version, kind:'native' });
 const original = await fs.readFile(path.join(m.profile, 'native-claudejs-orig.js'), 'utf8');
 const intended = await fs.readFile(path.join(m.profile, 'native-claudejs-patched.js'), 'utf8');
+const authorization = body(await fs.readFile(overrideUrl, 'utf8'));
+const adaptation = JSON.parse(await fs.readFile(path.join(release, 'authorization-adaptation.json'), 'utf8'));
 const checks = {
   payloadChanged: content !== original,
   matchesExactCommunityPatchedPayload: content === intended,
@@ -19,6 +22,10 @@ const checks = {
   defaultReadConfigurable: content.includes('process.env.CLAUDE_CODE_READ_DEFAULT_LINES'),
   honestRewindHeader: content.includes('This session was rewound'),
   emptyReminderHandling: content.includes('trim()') && content.includes('(no content)'),
+  durableAuthorizationPresent: adaptation.adaptedBodySha256 === digest(authorization) &&
+    (content.includes(authorization) || content.includes(JSON.stringify(authorization).slice(1, -1))),
+  staleSharedStateReconfirmationAbsent: !content.includes('If the target, destination, payload, or relevant shared state changes after confirmation, that confirmation no longer applies.'),
+  staleBlanketSharedStateGateAbsent: !content.includes('and before any action that mutates shared or collaborator-visible state, production, or a third-party system'),
 };
 const sampleOverrides = [];
 for (const name of await fs.readdir(path.join(m.profile, 'system-prompts'))) {

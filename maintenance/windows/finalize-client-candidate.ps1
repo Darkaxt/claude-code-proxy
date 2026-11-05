@@ -26,12 +26,16 @@ $applyReadback=Get-Content -LiteralPath (Join-Path $m.profile 'native-claudejs-p
 if (-not $applyReadback -or -not $payload.checks.matchesExactCommunityPatchedPayload) { throw 'Missing exact payload readback.' }
 Copy-Item -LiteralPath $ProbeReceipt -Destination (Join-Path $ReleaseDirectory 'candidate-probe.json')
 $binaryHash=Hash $m.candidateBinary
+$authorizationProbe=Get-Content -LiteralPath (Join-Path $ReleaseDirectory 'authorization-probe.json') -Raw | ConvertFrom-Json -AsHashtable
+if(-not $authorizationProbe.passed -or -not $authorizationProbe.childExited -or -not $authorizationProbe.nativeBypassPermissionsFlag -or $authorizationProbe.requestRetries -ne 0 -or $authorizationProbe.candidateSha256 -ne $binaryHash){throw 'Authorization behavior probe is missing, failed, lacks native bypass mode or belongs to other bytes.'}
 $verification=@{
     schema='claudegpt.client_verification.v1';qualified=$true;candidateSha256=$binaryHash
     version=$m.version;tweakVersion=$m.tweakVersion;promptCommit=$m.promptCommit
     startupPassed=$true;payloadChecks=$payload.checks;realProxyRequestPassed=$true
+    authorizationAdaptation=(Get-Content -LiteralPath (Join-Path $ReleaseDirectory 'authorization-adaptation.json') -Raw | ConvertFrom-Json -AsHashtable)
+    authorizationBehavior=$authorizationProbe
     communityExitClassification=$(if($cleanupOnly){'postwrite-temporary-cleanup-error'}else{'normal-success'})
-    cleanupFailureDisposition='All owned patcher processes exited; exact output readback and real request passed. Scratch removed separately through transactional cleanup.'
+    cleanupFailureDisposition='Owned patcher processes exited; exact output readback and real request passed. See the run cleanup receipt for temporary-file disposition.'
     at=[DateTime]::UtcNow.ToString('o')
     limits=@('Cross-platform/nonunique catalogue sites excluded; two obsolete overlapping inline loop files retained outside the active profile.','Actual reversing behavior and long-session compaction cadence are not certified by the benign probe.')
 }
@@ -41,9 +45,12 @@ $m.candidateSha256=$binaryHash
 Save $m (Join-Path $ReleaseDirectory 'candidate.json')
 $bundle=Join-Path $ReleaseDirectory 'maintenance'
 New-Item -ItemType Directory -Path $bundle -Force | Out-Null
-foreach($file in @('prepare-client.ps1','check-client-candidate.ps1','apply-client-profile.mjs','inspect-client-payload.mjs','review-client-preflight.mjs','probe-client.mjs','deploy-client.ps1','finalize-client-candidate.ps1')) {
+foreach($file in @('prepare-client.ps1','check-client-candidate.ps1','apply-client-profile.mjs','adapt-client-authorization.mjs','test-adapt-client-authorization.mjs','inspect-client-payload.mjs','review-client-preflight.mjs','probe-client.mjs','probe-client-authorization.mjs','deploy-client.ps1','finalize-client-candidate.ps1')) {
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot $file) -Destination (Join-Path $bundle $file)
 }
+$overrideBundle=Join-Path $bundle 'client-overrides'
+New-Item -ItemType Directory -Path $overrideBundle -Force | Out-Null
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'client-overrides/system-prompt-action-safety-and-truthful-reporting.md') -Destination (Join-Path $overrideBundle 'system-prompt-action-safety-and-truthful-reporting.md')
 $settings=Get-Content -LiteralPath $SettingsPath -Raw | ConvertFrom-Json -AsHashtable
 if(-not $settings.ContainsKey('env')) {$settings.env=@{}}
 $settings.env.DISABLE_AUTOUPDATER='1'

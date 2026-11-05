@@ -78,6 +78,7 @@ try {
         preparedAt=[DateTime]::UtcNow.ToString('o'); qualified=$false
     }
     Write-Json $inputs (Join-Path $ReleaseDirectory 'candidate.json')
+    Invoke-Logged $node @((Join-Path $PSScriptRoot 'adapt-client-authorization.mjs'),$ReleaseDirectory) (Join-Path $ReleaseDirectory 'authorization-adaptation.log')
     Write-Output "Prepared pinned inputs: $ReleaseDirectory"
 } finally {
     foreach ($name in $savedEnvironment.Keys) { [Environment]::SetEnvironmentVariable($name,$savedEnvironment[$name],'Process') }

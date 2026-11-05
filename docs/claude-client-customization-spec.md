@@ -29,6 +29,20 @@ the existing daily ClaudeGPT maintenance automation (2026-11-02).
   D:/Temp/claudegpt-client-20261102 directory (small-file/native I/O exception),
   cleaned transactionally after its last consumer. Commit and push verified
   maintenance changes normally; do not modify unrelated dirty documents.
+- C6: Preserve task-scoped durable user authorization in the managed action-safety
+  prompt (owner correction, 2026-11-05). Already authorized commits, pushes,
+  releases and closure writes must not demand new confirmation solely because
+  they affect shared state or their implementation payload evolves. Re-inspect
+  changes and ask only for genuinely new authority, a material scope change or
+  a missing user decision. Preserve actual host/tool approval controls, provider
+  enforcement, credential protection and truthful reporting. Apply the reviewed
+  local adaptation before community preflight/application; refuse unreviewed
+  community drift or local edits instead of silently replacing them. Verify the
+  adapted native payload and benign decision scenarios through the actual CLI.
+  When --dangerously-skip-permissions is active, it governs routine CLI approval
+  behavior: do not add conversational permission questions as a replacement for
+  skipped tool dialogs. This preserves task scope and actual host/tool/provider
+  enforcement. Exercise the behavior probe with that native flag enabled.
 
 ## Stage scope and reconciliation
 

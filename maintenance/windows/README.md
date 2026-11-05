@@ -24,6 +24,21 @@ Use the patcher's declared support plus reviewed prompt commits and actual check
 a README badge or a newer unsupported CLI release is insufficient compatibility
 evidence.
 
+The managed `auth1` adaptation preserves durable task authorization for ordinary
+commits, pushes, releases and closure writes. `prepare-client.ps1` applies it
+before preflight; application rechecks it before patching. The reviewed community
+action-safety prompt is hash-bound, and unexpected source changes or profile edits
+refuse replacement pending review. Keep `adapt-client-authorization.mjs` and
+`client-overrides` with frozen maintenance scripts. Native payload inspection
+requires the exact adapted paragraph and absence of the stale reconfirmation rule.
+Run `test-adapt-client-authorization.mjs <pinned-community-prompt> <task-scratch>`
+for source-drift, user-edit and preserved-paragraph regressions. Run
+`probe-client-authorization.mjs <candidate-exe> <exact-probe-directory>` once and
+retain its `authorization-probe.json` in the release before finalization. It
+checks authorized push/evolving-payload continuity and confirmation for a new
+public destination or exceeded one-time scope, without writing shared state.
+This does not alter host permissions, provider enforcement or model routing.
+
 Use `check-client-candidate.ps1 -Mode Preflight` and inspect the complete log;
 `review-client-preflight.mjs` records every finding. The cross-platform catalogue
 can report missing/nonunique native Windows sites even for unedited stubs. These
