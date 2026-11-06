@@ -22,7 +22,10 @@ const checks = {
   matchesExactCommunityPatchedPayload: content === intended,
   staleBytecodeAbsent: !clearBytecode,
   defaultReadConfigurable: content.includes('process.env.CLAUDE_CODE_READ_DEFAULT_LINES'),
-  honestRewindHeader: content.includes('This session was rewound'),
+  honestRewindHeader: content.includes('This session was rewound') || content.includes('This summary comes from a rewind'),
+  rewindCanonicalHeaderPreserved: ['2.9.22','2.9.23','2.9.24'].includes(m.tweakVersion) ||
+    (content.includes('This summary comes from a rewind') &&
+     !content.includes('.replace(/This session is being continued')),
   emptyReminderHandling: content.includes('trim()') && content.includes('(no content)'),
   durableAuthorizationPresent: adaptation.adaptedBodySha256 === digest(authorization) &&
     (content.includes(authorization) || content.includes(JSON.stringify(authorization).slice(1, -1))),

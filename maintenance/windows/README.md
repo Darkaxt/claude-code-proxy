@@ -64,7 +64,13 @@ the catalogue), plus the selected summary and read fixes. Experimental routers,
 refusal fallback, browser integration and permission bypass features remain off.
 
 Use `check-client-candidate.ps1 -Mode Apply`, inspect its exact outcome, then
-`-Mode Startup`, `inspect-client-payload.mjs` and `probe-client.mjs`. Payload
+`-Mode Startup`, `inspect-client-payload.mjs` and `probe-client.mjs`. With patcher
+2.9.25 and later, rewind inspection requires the canonical native summary header
+to remain intact and the explanatory note to be appended; older waiting packages
+with the header-replacement patch must be withdrawn before a corrected candidate
+is prepared. Preserve their historical qualification evidence. Preflight review
+can use exact catalogue text when the optional community original-hash index is
+absent; unknown findings and edited text still remain unresolved. Payload
 inspection requires exact equality with the community tool's saved patched JS,
 cleared bytecode and actual replacement samples. The benign probe disables tools,
 MCP and hooks for that invocation, persists no conversation and never retries;

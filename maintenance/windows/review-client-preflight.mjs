@@ -15,7 +15,9 @@ async function jsonFiles(dir) {
 }
 const [catalogPath] = await jsonFiles(path.join(profile,'prompt-data-cache'));
 const catalog=JSON.parse(await fs.readFile(catalogPath,'utf8'));
-const hashes=JSON.parse(await fs.readFile(path.join(profile,'systemPromptOriginalHashes.json'),'utf8'));
+let hashes={};
+try { hashes=JSON.parse(await fs.readFile(path.join(profile,'systemPromptOriginalHashes.json'),'utf8')); }
+catch(e) { if(e.code!=='ENOENT') throw e; }
 const byId=new Map();
 for(const p of catalog.prompts) {
   const original=p.pieces.map((piece,i)=>piece+(i<p.identifiers.length?(p.identifierMap?.[p.identifiers[i]]??p.identifiers[i]):'')).join('').trim();
