@@ -17,6 +17,7 @@ if(-not $fixtures.passed -or $fixtures.liveInstallationChanged){throw 'Required 
 if(Test-Path $RecoveryDirectory){throw 'Recovery destination exists; resolve it first'}
 $imageHash=Hash $ImageActive;$clientHash=Hash $ClientActive
 $image=Read $ImageActive;$client=Read $ClientActive
+$priorRecoveryPackage=$image.rollback.recoveryPackage
 if($client.pendingCandidate){throw 'Resolve unfinished client before rebinding recovery'}
 $originalState=Split-Path $image.activationReceipt
 $originalManifest=Join-Path $originalState 'activation-manifest.json'
@@ -36,6 +37,12 @@ $packagePath=Join-Path $RecoveryDirectory 'package.json'
 Save $package $packagePath
 & (Join-Path $RecoveryDirectory 'restore-integration.ps1') -RecoveryPackage $packagePath -ValidateOnly
 if(-not $image.originalRecovery){$image.originalRecovery=$image.rollback}
+if(-not $image.originalRuntimeProvenance){$image.originalRuntimeProvenance=@{proxySourceCommit=$image.proxySourceCommit;integratedUpstreamCommit=$image.integratedUpstreamCommit;proxyBinarySha256=$image.proxyBinarySha256;clientBinarySha256=$image.clientBinarySha256;clientSettingsSha256=$image.clientSettingsSha256}}
+$image.proxySourceCommit=$runtime.sourceCommit
+$image.integratedUpstreamCommit=$runtime.integratedUpstreamCommit
+$image.proxyBinarySha256=$runtime.candidateSha256
+$image.clientBinarySha256=$client.sha256
+$image.clientSettingsSha256=Hash 'C:\Users\darka\.claude\settings.json'
 $image.rollback=$image.rollback.Clone()
 $image.rollback.restoreScript=Join-Path $RecoveryDirectory 'restore-integration.ps1'
 $image.rollback.restoreScriptSha256=Hash $image.rollback.restoreScript
@@ -47,6 +54,19 @@ $image.rollback.procedure="At fresh idle validate with restore-integration.ps1 -
 $image.recoveryVerification=@{passed=$true;at=[DateTime]::UtcNow.ToString('o');package=$packagePath;liveRestoreExecuted=$false;fixtures=$FixtureResult}
 Save $image (Join-Path $RecoveryDirectory 'image-active-staged.json')
 $cm=Read $client.manifest
+# A proxy activation legitimately changes build provenance. Verify its prior
+# binding against the preceding qualified recovery package before advancing it.
+$provenance=Join-Path $runtime.installDirectory 'build-info.json'
+foreach($f in $cm.protectedFiles){
+ if($f.path -eq $provenance -and $f.sha256 -ne $runtime.expectedInstalledBuildInfoHash){
+  if(-not $priorRecoveryPackage){throw 'Prior qualified runtime binding required'}
+  $priorPackage=Read $priorRecoveryPackage
+  if((Hash $priorPackage.runtimeManifest) -ne $priorPackage.runtimeManifestSha256){throw 'Prior runtime manifest changed'}
+  $priorRuntime=Read $priorPackage.runtimeManifest
+  if($f.sha256 -ne $priorRuntime.expectedInstalledBuildInfoHash){throw 'Unexpected prior client provenance binding'}
+  $f.sha256=$runtime.expectedInstalledBuildInfoHash
+ }
+}
 # Only the integration's authorized recovery metadata changed. Keep every other
 # protected digest, installed pair and original activation receipt intact.
 $matches=0
@@ -65,6 +85,8 @@ $client.manifest=$clientManifest
 $client.restoreScript=Join-Path $RecoveryDirectory 'restore-client.ps1'
 $client.recoveryBinding=@{manifest=$clientManifest;manifestSha256=(Hash $clientManifest);deployer=(Join-Path $client.releaseDirectory 'maintenance\deploy-client.ps1');originalActivationReceipt=$client.receipt;restoreMode='Restore';validateMode='Verify';procedure='At fresh idle invoke the frozen deployer with this bound manifest and -Mode Restore; Verify checks current installed/protected state without changes.'}
 $client.imageIntegration.recoveryPackage=$packagePath
+$client.imageIntegration.proxySourceCommit=$runtime.sourceCommit
+$client.imageIntegration.proxyBinarySha256=$runtime.candidateSha256
 $client.recoveryBinding.restoreScript=$client.restoreScript
 $client.recoveryBinding.restoreScriptSha256=Hash $client.restoreScript
 $client.recoveryBinding.procedure="At fresh idle run restore-client.ps1 -RecoveryPackage $packagePath; add -ValidateOnly for current installed/protected checks without changes."
