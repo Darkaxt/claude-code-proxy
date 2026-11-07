@@ -65,6 +65,8 @@ pub(crate) struct CodexWebSocketEventStream {
     socket_id: Arc<AtomicU64>,
     full_context_retry: Arc<AtomicBool>,
     provider_retry_handoff: Arc<AtomicBool>,
+    recorder: Option<super::flight_recorder::Recorder>,
+    replaying_first_event: bool,
 }
 
 #[derive(Clone)]
@@ -87,6 +89,8 @@ impl CodexWebSocketEventStream {
                 socket_id: socket_id.clone(),
                 full_context_retry: full_context_retry.clone(),
                 provider_retry_handoff: provider_retry_handoff.clone(),
+                recorder: None,
+                replaying_first_event: false,
             },
             CodexWebSocketSocketIdPublisher {
                 socket_id,
@@ -97,7 +101,44 @@ impl CodexWebSocketEventStream {
     }
 
     pub(crate) async fn recv(&mut self) -> Option<Result<serde_json::Value, CodexError>> {
-        self.receiver.recv().await
+        let item = self.receiver.recv().await;
+        if self.replaying_first_event {
+            self.replaying_first_event = false;
+        } else if let Some(recorder) = self.recorder.as_mut() {
+            match &item {
+                Some(Ok(payload)) => {
+                    if let Some(status) = recorder.observe(payload) {
+                        recorder.fail("upstream_event", status);
+                    }
+                }
+                Some(Err(error)) => recorder.error(error),
+                None => recorder.end_of_stream(),
+            }
+        }
+        item
+    }
+
+    pub(super) fn with_recorder(mut self, recorder: super::flight_recorder::Recorder) -> Self {
+        self.recorder = Some(recorder);
+        self
+    }
+
+    pub(super) fn set_diagnostic_compaction(&mut self, boundary: bool) {
+        if let Some(recorder) = self.recorder.as_mut() {
+            recorder.set_compaction(boundary);
+        }
+    }
+
+    pub(super) fn set_diagnostic_input_tokens(&mut self, tokens: u64) {
+        if let Some(recorder) = self.recorder.as_mut() {
+            recorder.set_estimated_input_tokens(tokens);
+        }
+    }
+
+    pub(super) fn record_local_failure(&mut self, class: &'static str, status: u16) {
+        if let Some(recorder) = self.recorder.as_mut() {
+            recorder.fail(class, status);
+        }
     }
 
     pub(crate) fn socket_id(&self) -> Option<u64> {
@@ -123,6 +164,7 @@ impl CodexWebSocketEventStream {
         &mut self,
         receiver: CodexWebSocketEventReceiver,
     ) -> CodexWebSocketEventReceiver {
+        self.replaying_first_event = true;
         std::mem::replace(&mut self.receiver, receiver)
     }
 }
@@ -211,6 +253,7 @@ impl WebSocketProxyConfig {
             detail: None,
             retry_after: None,
             usage_limit: None,
+            cyber_policy: false,
             origin: CodexErrorOrigin::WebSocketHandshake,
         })?;
         if !http_url.starts_with("https://") {
@@ -751,6 +794,7 @@ pub(super) async fn codex_websocket_request(
         detail: None,
         retry_after: None,
         usage_limit: None,
+        cyber_policy: false,
         origin: CodexErrorOrigin::WebSocketHandshake,
     })?;
     let body_json = serde_json::to_string(body_value).unwrap_or_default();
@@ -839,6 +883,7 @@ pub(super) async fn codex_websocket_request(
                 detail: None,
                 retry_after: None,
                 usage_limit: None,
+                cyber_policy: false,
                 origin: CodexErrorOrigin::WebSocket,
             }
         })?;
@@ -878,6 +923,7 @@ pub(super) async fn codex_websocket_request(
             detail: Some("previous_response_not_found".to_string()),
             retry_after: None,
             usage_limit: None,
+            cyber_policy: false,
             origin: CodexErrorOrigin::WebSocket,
         });
     }
@@ -979,6 +1025,7 @@ pub(super) async fn prepare_codex_websocket(
         detail: None,
         retry_after: None,
         usage_limit: None,
+        cyber_policy: false,
         origin: CodexErrorOrigin::WebSocketHandshake,
     })?;
     let requires_origin = continuation
@@ -1031,6 +1078,7 @@ fn pooled_validation_error(detail: String) -> CodexError {
         detail: None,
         retry_after: None,
         usage_limit: None,
+        cyber_policy: false,
         origin: CodexErrorOrigin::WebSocketHandshake,
     }
 }
@@ -1081,6 +1129,7 @@ pub(super) fn start_codex_websocket_events(
                     detail: None,
                     retry_after: None,
                     usage_limit: None,
+                    cyber_policy: false,
                     origin: CodexErrorOrigin::WebSocket,
                 }))
                 .await;
@@ -1131,6 +1180,7 @@ pub(super) async fn codex_websocket_event_stream(
         detail: Some(error.to_string()),
         retry_after: None,
         usage_limit: None,
+        cyber_policy: false,
         origin: CodexErrorOrigin::WebSocketHandshake,
     })?;
     let ready = prepare_codex_websocket(
@@ -1160,6 +1210,7 @@ fn continuation_socket_missing_error() -> CodexError {
         detail: Some(WEBSOCKET_CONTINUATION_SOCKET_MISSING_DETAIL.to_string()),
         retry_after: None,
         usage_limit: None,
+        cyber_policy: false,
         origin: CodexErrorOrigin::WebSocketHandshake,
     }
 }
@@ -1171,6 +1222,7 @@ fn missing_terminal_error() -> CodexError {
         detail: Some(WEBSOCKET_MISSING_TERMINAL_DETAIL.to_string()),
         retry_after: None,
         usage_limit: None,
+        cyber_policy: false,
         origin: CodexErrorOrigin::WebSocket,
     }
 }
@@ -1182,6 +1234,7 @@ fn response_start_timeout_error(timeout_ms: u64) -> CodexError {
         detail: Some(WEBSOCKET_RESPONSE_START_TIMEOUT_DETAIL.to_string()),
         retry_after: None,
         usage_limit: None,
+        cyber_policy: false,
         origin: CodexErrorOrigin::WebSocket,
     }
 }
@@ -1300,6 +1353,7 @@ fn websocket_protocol_error(message: &str) -> CodexError {
         detail: None,
         retry_after: None,
         usage_limit: None,
+        cyber_policy: false,
         origin: CodexErrorOrigin::WebSocketHandshake,
     }
 }
@@ -1433,6 +1487,7 @@ fn reqwest_handshake_error(error: reqwest::Error) -> CodexError {
         detail: proxy_tunnel_rejected.then(|| WEBSOCKET_PROXY_TUNNEL_REJECTED_DETAIL.to_string()),
         retry_after: None,
         usage_limit: None,
+        cyber_policy: false,
         origin: CodexErrorOrigin::WebSocketHandshake,
     }
 }
@@ -1530,6 +1585,7 @@ fn tunnel_error(status: u16, retry_after: Option<String>) -> CodexError {
         },
         retry_after,
         usage_limit: None,
+        cyber_policy: false,
         origin: CodexErrorOrigin::WebSocketHandshake,
     }
 }
@@ -1541,6 +1597,7 @@ fn invalid_tunnel_response(message: &str) -> CodexError {
         detail: Some(WEBSOCKET_PROXY_TUNNEL_REJECTED_DETAIL.to_string()),
         retry_after: None,
         usage_limit: None,
+        cyber_policy: false,
         origin: CodexErrorOrigin::WebSocketHandshake,
     }
 }
@@ -1607,6 +1664,7 @@ async fn establish_connect_tunnel(
         detail: None,
         retry_after: None,
         usage_limit: None,
+        cyber_policy: false,
         origin: CodexErrorOrigin::WebSocketHandshake,
     })?;
 
@@ -1666,6 +1724,7 @@ async fn tls_connect(
             detail: None,
             retry_after: None,
             usage_limit: None,
+            cyber_policy: false,
             origin: CodexErrorOrigin::WebSocketHandshake,
         })?;
     Ok(Box::new(stream))
@@ -1693,6 +1752,7 @@ async fn connect_to_http_proxy(
             detail: None,
             retry_after: None,
             usage_limit: None,
+            cyber_policy: false,
             origin: CodexErrorOrigin::WebSocketHandshake,
         })?;
     let stream: BoxedWebSocketIo = Box::new(stream);
@@ -1727,6 +1787,10 @@ fn websocket_destination(url: &str) -> Result<(String, String), CodexError> {
 fn tungstenite_handshake_error(error: tokio_tungstenite::tungstenite::Error) -> CodexError {
     if let tokio_tungstenite::tungstenite::Error::Http(response) = error {
         let status = response.status().as_u16();
+        let cyber_policy = response
+            .body()
+            .as_deref()
+            .is_some_and(super::events::body_has_cyber_policy);
         let retry_after = response
             .headers()
             .get(http::header::RETRY_AFTER)
@@ -1738,6 +1802,7 @@ fn tungstenite_handshake_error(error: tokio_tungstenite::tungstenite::Error) -> 
             detail: Some(GENERIC_HANDSHAKE_ERROR_DETAIL.to_string()),
             retry_after,
             usage_limit: None,
+            cyber_policy,
             origin: CodexErrorOrigin::WebSocketHandshake,
         };
     }
@@ -1747,6 +1812,7 @@ fn tungstenite_handshake_error(error: tokio_tungstenite::tungstenite::Error) -> 
         detail: None,
         retry_after: None,
         usage_limit: None,
+        cyber_policy: false,
         origin: CodexErrorOrigin::WebSocketHandshake,
     }
 }
@@ -1760,7 +1826,7 @@ impl ConnectAttemptError {
     fn is_origin_forbidden(&self) -> bool {
         matches!(
             self,
-            Self::Origin(error) if error.status == http::StatusCode::FORBIDDEN.as_u16()
+            Self::Origin(error) if !error.cyber_policy && error.status == http::StatusCode::FORBIDDEN.as_u16()
         )
     }
 
@@ -1821,6 +1887,7 @@ async fn connect_via_http_upgrade(
         detail: None,
         retry_after: None,
         usage_limit: None,
+        cyber_policy: false,
         origin: CodexErrorOrigin::WebSocketHandshake,
     })?;
     let websocket_key = generate_key();
@@ -1860,6 +1927,7 @@ async fn connect_via_http_upgrade(
             detail: Some(detail),
             retry_after,
             usage_limit: None,
+            cyber_policy: false,
             origin: CodexErrorOrigin::WebSocketHandshake,
         });
     }
@@ -2048,7 +2116,7 @@ where
     let mut sse_body: Vec<u8> = Vec::new();
     let mut terminal_event: Option<WsEvent> = None;
     let response_event_budget = Duration::from_millis(idle_timeout_ms);
-    let response_wait_started = Instant::now();
+    let response_wait_started = tokio::time::Instant::now();
     let mut last_response_event_at = response_wait_started;
     let mut response_started = false;
 
@@ -2069,6 +2137,7 @@ where
                         detail: None,
                         retry_after: None,
                         usage_limit: None,
+                        cyber_policy: false,
                         origin: CodexErrorOrigin::WebSocket,
                     });
                 }
@@ -2094,6 +2163,7 @@ where
                         detail: None,
                         retry_after: None,
                         usage_limit: None,
+                        cyber_policy: false,
                         origin: CodexErrorOrigin::WebSocket,
                     }
                 } else {
@@ -2108,6 +2178,7 @@ where
                     detail: Some(WEBSOCKET_KEEPALIVE_FAILURE_DETAIL.to_string()),
                     retry_after: None,
                     usage_limit: None,
+                    cyber_policy: false,
                     origin: CodexErrorOrigin::WebSocket,
                 });
             }
@@ -2142,7 +2213,7 @@ where
 
                 if is_response_event(&parsed) {
                     response_started = true;
-                    last_response_event_at = Instant::now();
+                    last_response_event_at = tokio::time::Instant::now();
                 }
 
                 // Check for terminal events
@@ -2167,6 +2238,7 @@ where
                     detail: None,
                     retry_after: None,
                     usage_limit: None,
+                    cyber_policy: false,
                     origin: CodexErrorOrigin::WebSocket,
                 });
             }
@@ -2196,6 +2268,7 @@ where
                     detail: None,
                     retry_after: None,
                     usage_limit: None,
+                    cyber_policy: false,
                     origin: CodexErrorOrigin::WebSocket,
                 });
             }
@@ -2246,6 +2319,7 @@ where
                             detail: None,
                             retry_after: None,
                             usage_limit: None,
+                            cyber_policy: false,
                             origin: CodexErrorOrigin::WebSocket,
                         }
                     } else {
@@ -2272,6 +2346,7 @@ where
                             detail: None,
                             retry_after: None,
                             usage_limit: None,
+                            cyber_policy: false,
                             origin: CodexErrorOrigin::WebSocket,
                         }
                     } else {
@@ -2286,6 +2361,7 @@ where
                         detail: None,
                         retry_after: None,
                         usage_limit: None,
+                        cyber_policy: false,
                         origin: CodexErrorOrigin::WebSocket,
                     }));
                     break;
@@ -2333,6 +2409,7 @@ where
                             detail: Some("previous_response_not_found".to_string()),
                             retry_after: None,
                             usage_limit: None,
+                            cyber_policy: false,
                             origin: CodexErrorOrigin::WebSocket,
                         }));
                     } else {
@@ -2354,6 +2431,7 @@ where
                     detail: None,
                     retry_after: None,
                     usage_limit: None,
+                    cyber_policy: false,
                     origin: CodexErrorOrigin::WebSocket,
                 }));
                 break;
@@ -2362,7 +2440,21 @@ where
                 let _ = ws.send(Message::Pong(data)).await;
             }
             Some(Ok(Message::Pong(_))) | Some(Ok(Message::Frame(_))) => {}
-            Some(Ok(Message::Close(_))) | None => {
+            Some(Ok(Message::Close(frame))) => {
+                let mut error = missing_terminal_error();
+                if let Some(frame) = frame {
+                    // Preserve numeric close evidence, never the remote reason text.
+                    error.message = format!(
+                        "WebSocket close metadata: {} {} {}",
+                        u16::from(frame.code),
+                        frame.reason.len(),
+                        error.message
+                    );
+                }
+                terminal_item = Some(Err(error));
+                break;
+            }
+            None => {
                 terminal_item = Some(Err(missing_terminal_error()));
                 break;
             }
@@ -2373,6 +2465,7 @@ where
                     detail: None,
                     retry_after: None,
                     usage_limit: None,
+                    cyber_policy: false,
                     origin: CodexErrorOrigin::WebSocket,
                 }));
                 break;
@@ -2500,6 +2593,7 @@ mod tests {
             detail: None,
             retry_after: None,
             usage_limit: None,
+            cyber_policy: false,
             origin: CodexErrorOrigin::WebSocketHandshake,
         }
     }
@@ -2787,6 +2881,7 @@ mod tests {
                             detail: Some("second-detail".to_string()),
                             retry_after: Some("7".to_string()),
                             usage_limit: None,
+                            cyber_policy: false,
                             origin: CodexErrorOrigin::WebSocketHandshake,
                         }))
                     }
@@ -3528,6 +3623,7 @@ mod tests {
             }
         });
         let context = RequestContext {
+            notification_id: None,
             req_id: "terminal-order-request".to_string(),
             session_id: Some("header-session-is-not-pool-owner".to_string()),
             session_seq: None,
@@ -4246,8 +4342,9 @@ mod tests {
         assert!(error.message.contains("keepalive error"));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn keepalive_pongs_do_not_extend_response_start_timeout() {
+        let started_at = tokio::time::Instant::now();
         let (client_io, server_io) = tokio::io::duplex(1024);
         let mut client = WebSocketStream::from_raw_socket(client_io, Role::Client, None).await;
         let mut server = WebSocketStream::from_raw_socket(server_io, Role::Server, None).await;
@@ -4283,6 +4380,7 @@ mod tests {
             Some(WEBSOCKET_RESPONSE_START_TIMEOUT_DETAIL)
         );
         assert!(ping_count.load(Ordering::SeqCst) >= 2);
+        assert_eq!(started_at.elapsed(), Duration::from_millis(50));
         server_task.abort();
     }
 

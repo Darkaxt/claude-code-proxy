@@ -10,7 +10,8 @@ use super::IncompleteResponsePolicy;
 use super::read_rewrite::sanitize_read_args;
 use super::reasoning_signature::{PendingReasoning, encode_reasoning_signature};
 use super::reducer::{
-    CodexUsage, STOP_END_TURN, STOP_MAX_TOKENS, STOP_TOOL_USE, map_codex_usage_to_anthropic,
+    CodexRateLimits, CodexUsage, STOP_END_TURN, STOP_MAX_TOKENS, STOP_TOOL_USE,
+    map_codex_usage_to_anthropic, parse_codex_rate_limits,
 };
 
 const BUFFERED_READ_REPAIR_TRAILING_WHITESPACE_BYTES: usize = 1_024;
@@ -67,11 +68,15 @@ pub struct LiveStreamTranslator {
     web_search_results: Vec<LiveWebSearchResult>,
     deferred_text: Vec<(usize, String)>,
     semantic_output_started: bool,
+    text_output_started: bool,
     // Seeds Claude Code's live subagent counter until the provider returns
     // authoritative usage in the terminal message_delta.
     estimated_input_tokens: u64,
     incomplete_response_policy: IncompleteResponsePolicy,
     finished: bool,
+    // Latest `codex.rate_limits` event seen on this stream; handed to the
+    // usage mapper at finish so the terminal usage block carries the meter.
+    rate_limits: Option<CodexRateLimits>,
 }
 
 impl LiveStreamTranslator {
@@ -99,9 +104,11 @@ impl LiveStreamTranslator {
             web_search_results: Vec::new(),
             deferred_text: Vec::new(),
             semantic_output_started: false,
+            text_output_started: false,
             estimated_input_tokens,
             incomplete_response_policy: IncompleteResponsePolicy::Error,
             finished: false,
+            rate_limits: None,
         }
     }
 
@@ -134,6 +141,7 @@ impl LiveStreamTranslator {
 
         match kind {
             "codex.rate_limits" => {
+                self.rate_limits = parse_codex_rate_limits(payload).or(self.rate_limits.take());
                 self.emit_ping(traffic, &mut out);
             }
             "keepalive" | "response.created" | "response.in_progress" => {
@@ -196,6 +204,26 @@ impl LiveStreamTranslator {
 
     pub fn has_semantic_output(&self) -> bool {
         self.semantic_output_started
+    }
+
+    /// Only thinking has been exposed. Text and tool blocks cannot be replayed
+    /// safely because the consumer may already have acted on them.
+    pub fn can_reconnect(&self) -> bool {
+        !self.finished
+            && !self.text_output_started
+            && !self.saw_tool_use
+            && self.web_search_requests == 0
+            && self.blocks_by_output_index.is_empty()
+    }
+
+    pub fn prepare_reconnect(&mut self, traffic: Option<&TrafficCapture>) -> Vec<u8> {
+        let mut out = Vec::new();
+        self.close_thinking(traffic, &mut out);
+        self.reasoning_by_output_index.clear();
+        self.item_id_to_output_index.clear();
+        // Preserve message_started and anthropic_index: one downstream message,
+        // with fresh block indices for the replacement generation.
+        out
     }
 
     pub fn ping_chunk(&mut self, traffic: Option<&TrafficCapture>) -> Vec<u8> {
@@ -461,6 +489,7 @@ impl LiveStreamTranslator {
             return;
         }
         self.semantic_output_started = true;
+        self.text_output_started = true;
 
         let output_index = payload
             .get("output_index")
@@ -912,7 +941,10 @@ impl LiveStreamTranslator {
         self.close_open_blocks(traffic, out);
         self.emit_web_searches(traffic, out);
         self.ensure_message_start(traffic, out);
-        let usage = payload.get("response").map(parse_codex_usage);
+        let mut usage = payload.get("response").map(parse_codex_usage);
+        if let Some(usage) = usage.as_mut() {
+            usage.rate_limits = self.rate_limits.clone().map(Box::new);
+        }
         let stop_reason = if self.incomplete_response_policy
             == IncompleteResponsePolicy::AllowMaxOutputTokens
             && is_standard_max_output_tokens_incomplete(payload)
@@ -1111,6 +1143,7 @@ fn parse_codex_usage(response: &serde_json::Value) -> CodexUsage {
             .get("output_tokens_details")
             .and_then(|d| d.get("reasoning_tokens"))
             .and_then(|v| v.as_u64()),
+        rate_limits: None,
     }
 }
 
@@ -1624,6 +1657,21 @@ mod tests {
         let out = String::from_utf8(out).unwrap();
         assert!(out.contains("event: ping"));
         assert!(!out.contains("event: error"));
+
+        let finish = translator
+            .accept(
+                &json!({
+                    "type": "response.completed",
+                    "response": {"id": "resp_1", "status": "completed", "usage": {"input_tokens": 5, "output_tokens": 2}}
+                }),
+                None,
+            )
+            .unwrap();
+        let finish = String::from_utf8(finish).unwrap();
+        assert!(
+            finish.contains(r#""codex_rate_limits":{"limit_reached":true}"#),
+            "{finish}"
+        );
     }
 
     #[test]
