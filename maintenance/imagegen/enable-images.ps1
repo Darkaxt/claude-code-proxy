@@ -1,6 +1,6 @@
 #Requires -Version 7.4
 [CmdletBinding()]
-param([Parameter(Mandatory)][string]$Manifest,[ValidateSet('Validate','Enable','Restore')][string]$Mode='Validate',[string]$LifecycleScript)
+param([Parameter(Mandatory)][string]$Manifest,[ValidateSet('Validate','Enable','Restore','ValidateRestore')][string]$Mode='Validate',[string]$LifecycleScript,[string]$RecoveryRuntimeManifest)
 $ErrorActionPreference='Stop'
 if(-not $LifecycleScript){
  $LifecycleScript=Join-Path $PSScriptRoot '../windows/deploy-fork.ps1'
@@ -31,9 +31,19 @@ function Replace-Config([string]$Source,[string]$Expected){
  Assert-ForkHash $config (Get-ForkHash $Source) 'config_replace_failed'
 }
 function Save-Result($Value){$Value|ConvertTo-Json -Depth 12|Set-Content -LiteralPath $receiptPath -Encoding utf8NoBOM}
-if($Mode -eq 'Restore'){
+if($Mode -in @('Restore','ValidateRestore')){
  $prior=Get-Content -LiteralPath $receiptPath -Raw|ConvertFrom-Json
  if($prior.manifestSha256 -ne $manifestHash -or $prior.status -ne 'enabled_verified'){throw 'restore_receipt_mismatch'}
+ if($RecoveryRuntimeManifest){
+  # Preserve the original activation receipt/config rollback. Only a separately
+  # qualified fork manifest may bind an authorized later runtime/config baseline.
+  $runtime=Read-ForkManifest $RecoveryRuntimeManifest
+  foreach($field in @('installDirectory','configDirectory','baseUri')){
+   if($runtime[$field] -ne $m[$field]){throw 'recovery_runtime_target_changed'}
+  }
+  foreach($field in @('imagegenReceiptPath','imagegenRollbackDirectory','imagegenOriginalHash','imagegenEnabledHash','imagegenUpdatedConfig')){$runtime[$field]=$m[$field]}
+  $m=$runtime
+ }
  Assert-ForkHash $oldConfig $m.imagegenOriginalHash 'rollback_config_changed'
  Set-ConfigProof $m.imagegenEnabledHash
 }else{
@@ -53,7 +63,7 @@ Assert-ForkConsumers $m
 $identity=Get-ForkIdentity $m
 $models=Get-ForkModels $m
 $version=Get-ForkVersion $exe
-if($Mode -eq 'Validate'){Write-Output 'Image gate/config/lifecycle inputs validated; no live change.';return}
+if($Mode -in @('Validate','ValidateRestore')){Write-Output 'Image gate/config/lifecycle inputs validated; no live change.';return}
 $mutex=[Threading.Mutex]::new($false,'Local\ClaudeCodeProxyUpdater-mutex')
 $held=$false;$stopped=$false;$replacement=$null
 try{

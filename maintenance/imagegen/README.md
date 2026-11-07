@@ -49,3 +49,15 @@ also requires a real image and actual Claude CLI tool call, not only these tests
 Retain a versioned installed package, exact source revision/hashes, activation
 receipt and original MCP/config/skill state with a restore procedure. Retire an
 older package only after checking current references and rollback consumers.
+
+After an authorized client/proxy upgrade, the original ImageGen activation
+manifest can contain an obsolete protected-settings or runtime digest. Keep that
+manifest and its original receipt unchanged. `enable-images.ps1 -Mode
+ValidateRestore -RecoveryRuntimeManifest <qualified-current-fork-manifest>` checks
+recovery without restarting; `-Mode Restore` accepts the same option. The runtime
+manifest must pass the normal fork qualification/protection contract and retain
+the exact installation, configuration directory and endpoint. Original receipt
+verification and config rollback hashes remain required. Retain the reviewed
+runtime manifest and frozen helper in the active recovery record, and refresh
+consumer safety before any actual restore. This does not re-enable a route,
+generate an image or change provider/permission settings.

@@ -23,6 +23,9 @@ $m.installDirectory=$install;$m.configDirectory=$config;$m.logDirectory=Join-Pat
 $m.instanceName='ClaudeGPTImageFixture-'+[Guid]::NewGuid().ToString('N');$m.existingProcessName=$m.instanceName;$m.baseUri="http://127.0.0.1:$port"
 $m.expectedInstalledHash=Get-ForkHash (Join-Path $install 'claude-code-proxy.exe');$m.expectedInstalledBuildInfoHash=Get-ForkHash (Join-Path $install 'build-info.json')
 $m.protectedFiles=@(@{path=$cfg;sha256=(Get-ForkHash $cfg)})
+$clientSettings=Join-Path $FixtureRoot 'client-settings.json'
+Set-Content $clientSettings '{"version":"original"}' -Encoding utf8NoBOM
+$m.protectedFiles+=@{path=$clientSettings;sha256=(Get-ForkHash $clientSettings)}
 $m.consumerReviewPath=$review;$m.consumerReviewSha256=Get-ForkHash $review;$m.requiredModelIds=@('gpt-6.1-sol')
 $m.rollbackDirectory=Join-Path $FixtureRoot 'unused-standard-rollback';$m.receiptPath=Join-Path $FixtureRoot 'unused-standard-receipt.json'
 $m.imagegenOriginalHash=Get-ForkHash $cfg;$m.imagegenUpdatedConfig=$next;$m.imagegenEnabledHash=Get-ForkHash $next
@@ -39,15 +42,28 @@ try{
  & $enable -Manifest $manifest -Mode Enable
  $receipt=Get-Content $m.imagegenReceiptPath -Raw|ConvertFrom-Json
  if($receipt.status -ne 'enabled_verified' -or (Get-ForkHash $cfg) -ne $m.imagegenEnabledHash){throw 'Enable did not verify'}
- & $enable -Manifest $manifest -Mode Restore
+ # A verified later client update must not require forging the original receipt.
+ Set-Content $clientSettings '{"version":"authorized-update"}' -Encoding utf8NoBOM
+ $refused=$false
+ try{& $enable -Manifest $manifest -Mode ValidateRestore}catch{$refused=$_.Exception.Message -match 'protected_file_changed'}
+ if(-not $refused){throw 'Stale original protection did not refuse recovery'}
+ $runtime=$m.Clone()
+ $runtime.protectedFiles=@(@{path=$cfg;sha256=$m.imagegenEnabledHash},@{path=$clientSettings;sha256=(Get-ForkHash $clientSettings)})
+ $runtimeManifest=Join-Path $FixtureRoot 'recovery-runtime.json'
+ $runtime|ConvertTo-Json -Depth 15|Set-Content $runtimeManifest -Encoding utf8NoBOM
+ & $enable -Manifest $manifest -Mode ValidateRestore -RecoveryRuntimeManifest $runtimeManifest
+ $beforeRestore=Get-ForkIdentity $m
+ if($beforeRestore.child.Id -ne $receipt.childPid){throw 'Recovery validation restarted fixture'}
+ & $enable -Manifest $manifest -Mode Restore -RecoveryRuntimeManifest $runtimeManifest
  if((Get-ForkHash $cfg) -ne $m.imagegenOriginalHash){throw 'Explicit restore failed'}
  $m.requiredModelIds=@('fictional-model-that-does-not-exist');$m.imagegenRollbackDirectory=Join-Path $FixtureRoot 'failed-rollback';$m.imagegenReceiptPath=Join-Path $FixtureRoot 'failed-receipt.json'
+ $m.protectedFiles=@(@{path=$cfg;sha256=(Get-ForkHash $cfg)},@{path=$clientSettings;sha256=(Get-ForkHash $clientSettings)})
  $m|ConvertTo-Json -Depth 15|Set-Content $manifest -Encoding utf8NoBOM
  $caught=$false
  try{& $enable -Manifest $manifest -Mode Enable}catch{$caught=$true}
  $recovery=Get-Content $m.imagegenReceiptPath -Raw|ConvertFrom-Json
  if(-not $caught -or $recovery.status -ne 'rolled_back_verified' -or $recovery.failure -ne 'model_verification_failed' -or (Get-ForkHash $cfg) -ne $m.imagegenOriginalHash){throw 'Fictional post-start failure did not restore verified original state'}
- @{passed=$true;checks=@('validation leaves process/config intact','owned image-gate activation and HTTP 405','explicit config restore and HTTP 404','fictional post-start failure restores config/service');realInferenceRequests=0;liveInstallationChanged=$false;binaryAndBuildInfoUnchanged=$true}|ConvertTo-Json -Depth 6|Set-Content -LiteralPath $ResultPath -Encoding utf8NoBOM
+ @{passed=$true;checks=@('validation leaves process/config intact','owned image-gate activation and HTTP 405','stale protected baseline refuses recovery','qualified runtime recovery validation leaves process intact','explicit config restore and HTTP 404 with original receipt preserved','fictional post-start failure restores config/service');realInferenceRequests=0;liveInstallationChanged=$false;binaryAndBuildInfoUnchanged=$true}|ConvertTo-Json -Depth 6|Set-Content -LiteralPath $ResultPath -Encoding utf8NoBOM
  Write-Output 'Isolated image-gate activation and recovery fixtures passed.'
 }finally{
  $current=Get-ForkIdentity $m -AllowAbsent
