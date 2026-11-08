@@ -49,6 +49,9 @@ foreach($file in @('prepare-client.ps1','check-client-candidate.ps1','preflight-
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot $file) -Destination (Join-Path $bundle $file)
 }
 $overrideBundle=Join-Path $bundle 'client-overrides'
+foreach($file in @('exclude-client-loop-overlaps.mjs','test-client-loop-overlaps.mjs')) {
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot $file) -Destination (Join-Path $bundle $file)
+}
 New-Item -ItemType Directory -Path $overrideBundle -Force | Out-Null
 foreach($override in Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'client-overrides') -Filter '*.md' -File){Copy-Item -LiteralPath $override.FullName -Destination (Join-Path $overrideBundle $override.Name)}
 $settings=Get-Content -LiteralPath $SettingsPath -Raw | ConvertFrom-Json -AsHashtable

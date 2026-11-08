@@ -57,9 +57,15 @@ Use `check-client-candidate.ps1 -Mode Preflight` and inspect the complete log;
 can report missing/nonunique native Windows sites even for unedited stubs. These
 are not a green preflight: retain and classify them and exclude uncertifiable
 named sites. `apply-client-profile.mjs` honors frontmatter/built-in shadows and
-retains the obsolete overlapping 2.1.138 inline loop files outside the active
-profile, using the current named variable-mapped prompts. It invokes the published
-community CLI unchanged with prompt IDs in-process (Windows argv is too short for
+retains overlapping inline loop files outside the active profile, using the
+current named variable-mapped prompts.
+The loop-overlap helper accepts exact reviewed hashes for both the historical
+2.1.138 and realigned 2.1.318 blobs, preserving either pair outside the active
+profile. Unknown bytes or existing conflicting exclusions refuse before either
+file moves. Run `test-client-loop-overlaps.mjs <old-release> <new-release>
+<task-scratch>` to verify both revisions, edit refusal and named-prompt retention.
+Application invokes the published community CLI unchanged with prompt IDs
+in-process (Windows argv is too short for
 the catalogue), plus the selected summary and read fixes. Experimental routers,
 refusal fallback, browser integration and permission bypass features remain off.
 

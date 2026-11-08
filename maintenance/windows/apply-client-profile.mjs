@@ -6,6 +6,7 @@ import { pathToFileURL } from 'node:url';
 import { createRequire } from 'node:module';
 import { adaptClientAuthorization } from './adapt-client-authorization.mjs';
 import { excludePristineLiterals } from './exclude-client-pristine-literals.mjs';
+import { excludeLoopOverlaps } from './exclude-client-loop-overlaps.mjs';
 
 const release = path.resolve(process.argv[2] ?? '');
 const manifest = JSON.parse(await fs.readFile(path.join(release, 'candidate.json'), 'utf8'));
@@ -25,18 +26,7 @@ if (review.total !== review.allFindings.length || review.kinds['raw-non-ascii'] 
 // Keep the source intact and select only uniquely addressable catalogue IDs.
 const excludedIds = new Set(review.allFindings.filter(f=>f.kind==='cardinality').map(f=>f.id));
 const legacy = ['inline-loop-tick-absent.md','inline-loop-tick-tasks.md'];
-const exclusions = path.join(release,'profile-exclusions');
-await fs.mkdir(exclusions,{recursive:true});
-for (const name of legacy) {
-  const source=path.join(manifest.profile,'system-prompts',name);
-  let text;
-  try { text=await fs.readFile(source,'utf8'); }
-  catch(e) { if(e.code!=='ENOENT')throw e; text=await fs.readFile(path.join(exclusions,name),'utf8'); }
-  if(!text.includes('ccVersion: \'2.1.138\'') || !text.includes('${dY}')) {
-    throw new Error(`Legacy override changed; review before excluding ${name}`);
-  }
-  try { await fs.rename(source,path.join(exclusions,name)); } catch(e) {if(e.code!=='ENOENT')throw e;}
-}
+const excludedLoopFiles = await excludeLoopOverlaps(release, manifest.profile);
 async function findCatalog(dir) {
   for(const f of await fs.readdir(dir,{withFileTypes:true})) {
     const p=path.join(dir,f.name);
@@ -69,6 +59,7 @@ await fs.writeFile(path.join(release,'profile-adaptation.json'),JSON.stringify({
   excludedCatalogueIds:[...excludedIds],
   shadowedCatalogueIds:[...shadowedIds],
   excludedLegacyFiles:legacy,
+  excludedLoopFiles,
   reason:'Windows sites must be uniquely addressable. Legacy inline loop prompts contain stale minified bindings and shadow current named loop prompts; use the canonical variable-mapped overrides.'
 },null,2));
 ids.push('fix-summarize-from-here', 'fix-rewind-summary-header',
