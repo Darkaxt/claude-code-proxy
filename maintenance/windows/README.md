@@ -101,7 +101,13 @@ exact fixture root, to verify byte preservation and the one-flag setup case.
 file. `-Mode Apply` refuses running clients, changed inputs or protected files,
 checks that settings change only adds `DISABLE_AUTOUPDATER=1`, saves rollback,
 atomically replaces the executable/settings, verifies hashes/version and makes
-one installed benign request. Failure restores and verifies the previous pair.
+one installed benign request. When managed settings already match byte for byte,
+activation and restoration preserve the existing settings file without replacing
+it. Staging collisions for files that will be replaced refuse before saving a
+rollback or changing live files; unrelated unused staging is preserved. Rollback
+restores only hashes that differ from the previous pair, so an unchanged settings
+file cannot interrupt otherwise verified binary recovery. Failure restores and
+verifies the previous pair.
 `-Mode Verify` independently rechecks the installed pair; `-Mode Restore` restores
 the receipt-bound previous pair at idle. Use the frozen release copy with its
 exact private manifest for recovery. Never stop user clients to obtain idle or

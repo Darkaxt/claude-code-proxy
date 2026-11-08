@@ -23,6 +23,15 @@ function Assert-Protected {
     foreach ($f in $m.protectedFiles) { Assert-Hash $f.path $f.sha256 }
 }
 function Assert-Settings([string]$ExpectedHash) { Assert-Hash $m.settingsPath $ExpectedHash }
+function Assert-StagingAvailable([bool]$SettingsWillChange) {
+    $destinations=@($m.installedBinary)
+    if($SettingsWillChange){$destinations+= $m.settingsPath}
+    foreach($destination in $destinations) {
+        if(Test-Path -LiteralPath "$destination.claudegpt-new") {
+            throw "Unfinished activation staging file: $destination.claudegpt-new"
+        }
+    }
+}
 function Assert-SettingsChange {
     $expected = Get-Content -LiteralPath $m.settingsPath -Raw | ConvertFrom-Json -AsHashtable
     if (-not $expected.ContainsKey('env')) { $expected.env = @{} }
@@ -72,12 +81,15 @@ if ($Mode -eq 'Verify') {
 if ($Mode -eq 'Restore') {
     Assert-Idle
     Assert-Protected
+    Assert-StagingAvailable ($m.expectedSettingsSha256 -ne $m.updatedSettingsSha256)
     Assert-Hash $m.installedBinary $m.candidateSha256
     Assert-Settings $m.updatedSettingsSha256
     Assert-Hash (Join-Path $m.rollbackDirectory 'claude.exe') $m.expectedInstalledSha256
     Assert-Hash (Join-Path $m.rollbackDirectory 'settings.json') $m.expectedSettingsSha256
     Replace-File (Join-Path $m.rollbackDirectory 'claude.exe') $m.installedBinary $m.candidateSha256
-    Replace-File (Join-Path $m.rollbackDirectory 'settings.json') $m.settingsPath $m.updatedSettingsSha256
+    if($m.expectedSettingsSha256 -ne $m.updatedSettingsSha256) {
+        Replace-File (Join-Path $m.rollbackDirectory 'settings.json') $m.settingsPath $m.updatedSettingsSha256
+    }
     Assert-Hash $m.installedBinary $m.expectedInstalledSha256
     Assert-Settings $m.expectedSettingsSha256
     $restoredVersion = Version $m.installedBinary
@@ -91,6 +103,7 @@ Assert-Hash $m.installedBinary $m.expectedInstalledSha256
 Assert-Settings $m.expectedSettingsSha256
 Assert-Hash $m.updatedSettingsPath $m.updatedSettingsSha256
 Assert-SettingsChange
+Assert-StagingAvailable ($m.expectedSettingsSha256 -ne $m.updatedSettingsSha256)
 if ((Version $m.candidateBinary) -ne "$($m.version) (Claude Code)") { throw 'Candidate version mismatch.' }
 if ($Mode -eq 'Validate') { Write-Output 'Candidate and activation inputs verified; no live files changed.'; return }
 $mutex = [Threading.Mutex]::new($false, 'Local\ClaudeGPTClientMaintenance')
@@ -100,6 +113,7 @@ try {
     if (-not $held) { throw 'Another managed client activation is running.' }
     Assert-Idle
     Assert-Protected
+    Assert-StagingAvailable ($m.expectedSettingsSha256 -ne $m.updatedSettingsSha256)
     Assert-Hash $m.installedBinary $m.expectedInstalledSha256
     Assert-Settings $m.expectedSettingsSha256
     if (Test-Path -LiteralPath $m.rollbackDirectory) { throw 'Rollback destination exists; inspect earlier activation.' }
@@ -116,8 +130,10 @@ try {
         # Stage next to each destination, then replace atomically on that volume.
         Replace-File $m.candidateBinary $m.installedBinary $m.expectedInstalledSha256
         $binaryWritten = $true
-        Replace-File $m.updatedSettingsPath $m.settingsPath $m.expectedSettingsSha256
-        $settingsWritten = $true
+        if($m.updatedSettingsSha256 -ne $m.expectedSettingsSha256) {
+            Replace-File $m.updatedSettingsPath $m.settingsPath $m.expectedSettingsSha256
+            $settingsWritten = $true
+        }
         Assert-Installed
         & $m.nodePath $m.probeScript $m.installedBinary $m.probeDirectory *> $m.probeLog
         if ($LASTEXITCODE -ne 0) { throw 'Installed client request probe failed; inspect the retained probe log.' }
@@ -137,7 +153,7 @@ try {
         if ($currentBinaryHash -eq $m.candidateSha256) {
             Replace-File (Join-Path $m.rollbackDirectory 'claude.exe') $m.installedBinary $currentBinaryHash
         }
-        if ($currentSettingsHash -eq $m.updatedSettingsSha256) { Replace-File (Join-Path $m.rollbackDirectory 'settings.json') $m.settingsPath $currentSettingsHash }
+        if ($currentSettingsHash -ne $m.expectedSettingsSha256) { Replace-File (Join-Path $m.rollbackDirectory 'settings.json') $m.settingsPath $currentSettingsHash }
         Assert-Hash $m.installedBinary $m.expectedInstalledSha256
         Assert-Settings $m.expectedSettingsSha256
         Assert-Protected
