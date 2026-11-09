@@ -37,7 +37,7 @@ $verification=@{
     communityExitClassification=$(if($cleanupOnly){'postwrite-temporary-cleanup-error'}else{'normal-success'})
     cleanupFailureDisposition='Owned patcher processes exited; exact output readback and real request passed. See the run cleanup receipt for temporary-file disposition.'
     at=[DateTime]::UtcNow.ToString('o')
-    limits=@('Cross-platform/nonunique catalogue sites excluded; two obsolete overlapping inline loop files retained outside the active profile.','Actual reversing behavior and long-session compaction cadence are not certified by the benign probe.')
+    limits=@('Cross-platform/nonunique catalogue sites excluded; overlapping inline loop files are hash-verified exclusions or absent in the pinned source, as recorded in profile-adaptation.json.','Actual reversing behavior and long-session compaction cadence are not certified by the benign probe.')
 }
 Save $verification (Join-Path $ReleaseDirectory 'verification.json')
 $m.qualified=$true
@@ -49,7 +49,7 @@ foreach($file in @('prepare-client.ps1','check-client-candidate.ps1','preflight-
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot $file) -Destination (Join-Path $bundle $file)
 }
 $overrideBundle=Join-Path $bundle 'client-overrides'
-foreach($file in @('exclude-client-loop-overlaps.mjs','test-client-loop-overlaps.mjs')) {
+foreach($file in @('exclude-client-loop-overlaps.mjs','test-client-loop-overlaps.mjs','test-client-loop-absence.mjs')) {
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot $file) -Destination (Join-Path $bundle $file)
 }
 New-Item -ItemType Directory -Path $overrideBundle -Force | Out-Null

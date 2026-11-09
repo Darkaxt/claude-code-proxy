@@ -121,6 +121,12 @@ files. Preserve its concise result and clean scratch through transactional-clean
 after all consumers exit. Scripts and wrapper-only changes do not invalidate
 unchanged runtime verification; recheck affected behavior when it changes.
 
+Removed redundant inline loop overrides are accepted only when both are
+absent from the pinned prompt Git tree and the canonical variable-mapped loop
+files match that tree exactly. Missing local files alone do not establish removal;
+checkout drift, local edits and incomplete pairs refuse before mutation.
+`test-client-loop-absence.mjs <exact task scratch>` exercises this contract.
+
 Keep the one existing daily schedule and documented CLI background-updater disable
 setting. Create no separate auto-reapply hook or competing worker. A waiting
 candidate stays staged until client/continuation safety is clear. Preserve its
