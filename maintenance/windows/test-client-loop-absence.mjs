@@ -1,0 +1,41 @@
+import fs from 'node:fs/promises';
+import path from 'node:path';
+import assert from 'node:assert/strict';
+import {execFileSync} from 'node:child_process';
+import {excludeLoopOverlaps} from './exclude-client-loop-overlaps.mjs';
+
+const scratch = process.argv[2];
+if (!scratch) throw Error('Supply exact task scratch');
+const release = await fs.mkdtemp(path.join(scratch, 'loop-absence-fixture-'));
+const source = path.join(release, 'prompt-source'), profile = path.join(release, 'profile');
+await fs.mkdir(path.join(source, 'system-prompts-lcc'), {recursive: true});
+await fs.mkdir(path.join(profile, 'system-prompts'), {recursive: true});
+const names = ['system-prompt-loop-tick-loop-md-absent-dynamic.md', 'system-prompt-loop-tick-loop-md-tasks-dynamic.md'];
+for (const name of names) {
+  const text = `Canonical ${name} with variable mapping.\n`;
+  await fs.writeFile(path.join(source, 'system-prompts-lcc', name), text);
+  await fs.writeFile(path.join(profile, 'system-prompts', name), text);
+}
+const git = (...args) => execFileSync('git', ['-C', source, ...args], {windowsHide: true});
+git('init', '--quiet'); git('config', 'core.autocrlf', 'false'); git('add', '.');
+git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@invalid', '-c', 'core.hooksPath=NUL', 'commit', '--quiet', '-m', 'Declared canonical loop fixtures');
+const promptCommit = git('rev-parse', 'HEAD').toString().trim();
+await fs.writeFile(path.join(release, 'candidate.json'), JSON.stringify({promptCommit}));
+const result = await excludeLoopOverlaps(release, profile);
+assert.equal(result.length, 2);
+assert.ok(result.every(r => r.disposition === 'absent-in-pinned-source' && r.sourceCommit === promptCommit));
+assert.deepEqual(await excludeLoopOverlaps(release, profile), result);
+const canonical = path.join(profile, 'system-prompts', names[0]);
+await fs.appendFile(canonical, 'User edit');
+await assert.rejects(excludeLoopOverlaps(release, profile), /Canonical loop prompt changed/);
+await fs.copyFile(path.join(source, 'system-prompts-lcc', names[0]), canonical);
+await fs.writeFile(path.join(release, 'candidate.json'), JSON.stringify({promptCommit: 'a'.repeat(40)}));
+await assert.rejects(excludeLoopOverlaps(release, profile), /Pinned prompt checkout changed/);
+await fs.writeFile(path.join(release, 'candidate.json'), JSON.stringify({promptCommit}));
+await fs.writeFile(path.join(source, 'system-prompts-lcc/inline-loop-tick-absent.md'), 'Source override must not disappear locally.');
+git('add', '.');
+git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@invalid', '-c', 'core.hooksPath=NUL', 'commit', '--quiet', '-m', 'Source presence fixture');
+await fs.writeFile(path.join(release, 'candidate.json'), JSON.stringify({promptCommit: git('rev-parse', 'HEAD').toString().trim()}));
+await assert.rejects(excludeLoopOverlaps(release, profile), /Missing local override present in pinned source/);
+assert.equal(await fs.readFile(canonical, 'utf8'), `Canonical ${names[0]} with variable mapping.\n`);
+console.log('Pinned source absence accepted; missing source-declared override, checkout drift and canonical edits rejected; canonical profiles unchanged.');

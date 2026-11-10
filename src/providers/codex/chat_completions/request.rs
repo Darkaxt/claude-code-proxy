@@ -2,9 +2,7 @@ use http::StatusCode;
 use serde_json::{Map, Value, json};
 
 use crate::providers::codex::translate::{
-    model_allowlist::{
-        ALLOWED_MODELS, assert_allowed_model, resolve_model_request, uses_responses_lite,
-    },
+    model_allowlist::{assert_allowed_model, resolve_model_request, uses_responses_lite},
     request::{Effort, resolve_effort_override, to_codex_effort},
 };
 use crate::{config, registry::normalize_incoming_model};
@@ -55,7 +53,7 @@ fn translate_request_with_override(
             format!(
                 "Model '{requested_model}' resolves to unsupported model '{}'. Supported: {}",
                 error.model,
-                ALLOWED_MODELS.join(", ")
+                crate::codex_models::base_models().join(", ")
             ),
             Some("model"),
             Some("model_not_supported"),
@@ -455,6 +453,37 @@ mod tests {
         assert_eq!(translated.upstream["stream"], true);
         assert_eq!(translated.upstream["reasoning"]["effort"], "medium");
         assert_eq!(translated.upstream["reasoning"]["context"], "all_turns");
+    }
+
+    #[test]
+    fn tier_suffix_sets_service_tier() {
+        for (model, upstream_model, tier) in [
+            ("gpt-6-astra", "gpt-6-astra", None),
+            ("gpt-6-astra-fast", "gpt-6-astra", Some("priority")),
+            ("gpt-6-astra-ultrafast", "gpt-6-astra", Some("ultrafast")),
+            (
+                "gpt-6-astra-ultrafast[1m]",
+                "gpt-6-astra",
+                Some("ultrafast"),
+            ),
+        ] {
+            let mut body = base();
+            body["model"] = json!(model);
+            let translated = translate_request(body).unwrap();
+            assert_eq!(translated.upstream["model"], upstream_model, "{model}");
+            assert_eq!(
+                translated
+                    .upstream
+                    .get("service_tier")
+                    .and_then(Value::as_str),
+                tier,
+                "{model}"
+            );
+        }
+
+        let mut body = base();
+        body["model"] = json!("gpt-6-sol-ultrafast");
+        assert!(translate_request(body).is_err());
     }
 
     #[test]

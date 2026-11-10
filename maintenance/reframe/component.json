@@ -1,0 +1,34 @@
+{
+  "schema": "claudegpt.desktop-component.v1",
+  "repository": "https://github.com/Darkaxt/reframe.git",
+  "upstream": "https://github.com/TheyCallMeJuzou/reframe.git",
+  "branch": "codex/claudegpt",
+  "upstreamBase": "060ff208b7c2c82cad11785b8e3652bca11f49a6",
+  "version": "0.10.0-claudegpt.5",
+  "status": "released_qualified_waiting_local_idle",
+  "sourceCommit": "61669f9465c77b5ba4535ee7df7433cfe8557b28",
+  "sourcePath": "apps/reframe",
+  "specification": "docs/claudegpt-spec.md",
+  "build": "maintenance/build-windows.ps1",
+  "runtimeComponents": [
+    "managed Claude CLI",
+    "ClaudeGPT proxy",
+    "Reframe desktop",
+    "versioned managed thread-cleanup 0.1.1 filesystem helper with psutil 7.2.2"
+  ],
+  "release": "https://github.com/Darkaxt/reframe/releases/tag/v0.10.0-claudegpt.5",
+  "archiveSha256": "e64c2fd91ec1a76a64d6d30c06a7d4949f983ca48187c3132516c68c8f10bc74",
+  "executableSha256": "872937d5ed41d42cbfa12186818005b378f805b554f73a03c9b4f32dc88c121a",
+  "helperSourceCommit": "cebba98b1cf3a602e81bda1fe203242550fefe29",
+  "helperArchiveSha256": "3bfd331f9d13981f2dc146c0fb8bd8da2759716d81e1feffa90be098e379789b",
+  "terminalLauncherAsset": "start-anthropic-session.ps1",
+  "terminalLauncherSha256": "123a882f6349aa7f8eca2ca2440aba2b6ec598e9f74e80a47e8bc9ca3a530933",
+  "verificationLimits": [
+    "Unsigned Windows portable release.",
+    "One-confirmation native bulk archive/delete, per-item skips/failures/shared-index preservation, selected provider/model persistence/resume and native quit/profile/owned-stop checks passed using fictional histories.",
+    "Exact-source Windows CI passed, and the normal release was independently retrieved and payload/hash verified. Native package checks cover merged final-folder projects across paths/providers, actual locations, contextual plus, paging/pins and durable shutdown/restart migration.",
+    "One fresh native activity census per history mutation; ten small fictional deletions completed in 0.67 seconds. Real duration depends on selected data. No real user deletion replay.",
+    "Terminal launcher installed/hash verified; complete alias/argument/environment fixtures and an actual native claude-opus-5-5 no-tool reply passed with saved settings unchanged. Corrected GUI activation/installed verification remains pending while a live independent Claude terminal prevents the existing deployment idle contract."
+  ],
+  "releasePinRequirement": "Normal published release independently retrieved and verified against exact source/runtime input lineage and complete payload. Distinct native provider executables, merged projects and terminal routing qualified. Retain the candidate until the existing deployment idle condition is satisfied, then perform hash-bound activation and independent installed verification. Private machine-specific receipts remain outside Git."
+}

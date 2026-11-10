@@ -99,9 +99,24 @@ fn apply_auto_review_model(
     let override_model = configured_model
         .filter(|model| !model.is_empty())
         .or((original_provider == "codex").then_some(CODEX_AUTO_REVIEW_MODEL))?;
+    let requested_model = body.model.clone()?;
+    let fast_override = format!(
+        "{}-fast",
+        override_model
+            .strip_suffix("-fast")
+            .unwrap_or(override_model)
+    );
+    let override_model = if requested_model.ends_with("-fast")
+        && crate::providers::codex::translate::model_allowlist::is_valid_model_for_codex(
+            &fast_override,
+        ) {
+        fast_override
+    } else {
+        override_model.to_owned()
+    };
     let route = AutoReviewRoute {
-        requested_model: body.model.clone()?,
-        override_model: override_model.to_string(),
+        requested_model,
+        override_model,
     };
     body.model = Some(route.override_model.clone());
     Some(route)
@@ -576,6 +591,7 @@ async fn handler_transcription(State(state): State<Arc<AppState>>, req: Request<
         }
     };
     let context = RequestContext {
+        notification_id: None,
         req_id: req_id.clone(),
         session_id,
         session_seq: None,
@@ -751,6 +767,7 @@ async fn dispatch_image_request(
         monitor.provider_selected(&req_id, "codex", &model, None);
     }
     let context = RequestContext {
+        notification_id: None,
         req_id: req_id.clone(),
         session_id,
         session_seq: None,
@@ -1027,6 +1044,7 @@ async fn handler_responses(State(state): State<Arc<AppState>>, req: Request<Body
         }
     }
     let context = RequestContext {
+        notification_id: None,
         req_id: req_id.clone(),
         session_id,
         session_seq: current.map(|session| session.seq),
@@ -1267,6 +1285,7 @@ async fn handler_chat_completions(
         }
     }
     let context = RequestContext {
+        notification_id: None,
         req_id: req_id.clone(),
         session_id,
         session_seq: current.map(|session| session.seq),
@@ -1535,6 +1554,46 @@ async fn dispatch_request(
         }
     };
 
+    if let Some(thread) = body.extra.remove("thread")
+        && thread.get("type").and_then(Value::as_str) != Some("create")
+    {
+        let message = "capability_rejected: beta_header:message-threads-2026-08-12";
+        let response = json_error(StatusCode::BAD_REQUEST, "invalid_request_error", message);
+        log_request_completed(
+            &log,
+            RequestLogContext {
+                req_id: &req_id,
+                provider: None,
+                model: None,
+                count_tokens,
+                status: response.status(),
+                started_at,
+            },
+        );
+        let (response, details) = record_failed_response(
+            &log,
+            FailedResponseLogContext {
+                req_id: &req_id,
+                provider: None,
+                model: None,
+                count_tokens,
+                started_at,
+            },
+            response,
+        )
+        .await;
+        monitor_failed(
+            state.monitor.as_ref(),
+            &req_id,
+            Some(response.status()),
+            details
+                .as_ref()
+                .map(|details| details.message.as_str())
+                .unwrap_or(message),
+        );
+        return with_request_id(response, &req_id);
+    }
+
     if let Some(project) = project::name_from_request(
         body.extra.get("system"),
         body.messages.iter().rev().map(|message| &message.content),
@@ -1753,6 +1812,10 @@ async fn dispatch_request(
     }
 
     let context = RequestContext {
+        notification_id: headers
+            .get("x-clodex-notification-id")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned),
         req_id: req_id.clone(),
         session_id,
         session_seq: current.map(|s| s.seq),
@@ -1935,7 +1998,7 @@ async fn record_failed_response(
     let bytes = match body.collect().await {
         Ok(collected) => collected.to_bytes(),
         Err(err) => {
-            log.info(
+            log.error(
                 "request_failed",
                 Some(serde_json::Map::from_iter([
                     ("reqId".to_string(), json!(ctx.req_id)),
@@ -1984,7 +2047,7 @@ async fn record_failed_response(
     if let Some(path) = error_file.as_ref() {
         fields.insert("errorFile".to_string(), json!(path.display().to_string()));
     }
-    log.info("request_failed", Some(fields));
+    log.error("request_failed", Some(fields));
 
     (
         Response::from_parts(parts, Body::from(bytes)),
@@ -2340,6 +2403,25 @@ mod auto_review_tests {
     }
 
     #[test]
+    fn classifier_preserves_priority_on_supported_codex_override() {
+        for (configured, expected) in [
+            (None, "gpt-6-luna-fast"),
+            (Some("gpt-5.6-sol"), "gpt-5.6-sol-fast"),
+            (Some("grok-4.5"), "grok-4.5"),
+        ] {
+            let mut classifier = request(
+                "You are a security monitor for autonomous AI coding agents.",
+                false,
+                json!([]),
+            );
+            classifier.model = Some("gpt-6-astra-fast".into());
+            let route =
+                apply_auto_review_model(&mut classifier, false, configured, "codex").unwrap();
+            assert_eq!(route.override_model, expected);
+        }
+    }
+
+    #[test]
     fn non_codex_classifier_keeps_requested_model_without_override() {
         let mut classifier = request(
             "You are a security monitor for autonomous AI coding agents.",
@@ -2362,6 +2444,57 @@ mod auto_review_tests {
             .expect("configured classifier should be routed");
         assert_eq!(route.override_model, "grok-4.5");
         assert_eq!(classifier.model.as_deref(), Some("grok-4.5"));
+    }
+
+    #[test]
+    fn grok_session_classifier_routes_by_requested_model_or_explicit_override() {
+        use crate::config::AliasProvider;
+        use crate::registry::Registry;
+        use crate::session::{record_session_request, record_session_request_with_affinity_update};
+
+        let registry = Registry::new(AliasProvider::Codex);
+        let session_id = "grok-session-classifier-routing";
+        let initial = record_session_request(Some(session_id), None, "grok", "grok-4.6", 1)
+            .expect("Grok session");
+        assert_eq!(initial.affinity_provider, None);
+
+        for (requested, configured, expected_provider, expected_model) in [
+            ("claude-sonnet-4-6", None, "codex", "gpt-6-luna"),
+            ("grok-4.6", None, "grok", "grok-4.6"),
+            ("claude-sonnet-4-6", Some("grok-4.6"), "grok", "grok-4.6"),
+            ("gpt-6-luna", Some("grok-4.6"), "grok", "grok-4.6"),
+        ] {
+            let mut classifier = request(
+                "You are a security monitor for autonomous AI coding agents.",
+                false,
+                json!([]),
+            );
+            classifier.model = Some(requested.to_string());
+            let original = registry
+                .provider_for_model(requested, initial.affinity_provider.as_ref())
+                .expect("original provider");
+            let route =
+                apply_auto_review_model(&mut classifier, false, configured, original.name());
+            let model = classifier.model.as_deref().expect("classifier model");
+            let provider = if route.is_some() {
+                registry.provider_for_model(model, None).expect("override")
+            } else {
+                original
+            };
+            assert_eq!(provider.name(), expected_provider);
+            assert_eq!(model, expected_model);
+
+            let after_review = record_session_request_with_affinity_update(
+                Some(session_id),
+                Some(&initial),
+                provider.name(),
+                model,
+                route.is_none(),
+                2,
+            )
+            .expect("session after review");
+            assert_eq!(after_review.affinity_provider, None);
+        }
     }
 
     #[test]
