@@ -1,0 +1,15 @@
+{
+  "schema": "claudegpt.desktop-component.v1",
+  "repository": "https://github.com/Darkaxt/reframe.git",
+  "upstream": "https://github.com/TheyCallMeJuzou/reframe.git",
+  "branch": "codex/claudegpt",
+  "upstreamBase": "060ff208b7c2c82cad11785b8e3652bca11f49a6",
+  "version": "0.10.0-claudegpt.1",
+  "status": "source_integrated_release_pending_authentication",
+  "sourceCommit": "870b2822b8537f97ff25e31e934a071a30b4ca0f",
+  "sourcePath": "apps/reframe",
+  "specification": "docs/claudegpt-spec.md",
+  "build": "maintenance/build-windows.ps1",
+  "runtimeComponents": ["managed Claude CLI", "ClaudeGPT proxy", "Reframe desktop", "installed thread-cleanup filesystem helper"],
+  "releasePinRequirement": "Source pin is locally qualified and remotely verified; real Anthropic subscription qualification and published release/installed activation remain pending. Update the component delivery provenance after final delivery."
+}

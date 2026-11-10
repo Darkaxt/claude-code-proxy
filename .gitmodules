@@ -1,0 +1,4 @@
+[submodule "apps/reframe"]
+	path = apps/reframe
+	url = https://github.com/Darkaxt/reframe.git
+	branch = codex/claudegpt
