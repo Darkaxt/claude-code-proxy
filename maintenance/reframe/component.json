@@ -4,9 +4,9 @@
   "upstream": "https://github.com/TheyCallMeJuzou/reframe.git",
   "branch": "codex/claudegpt",
   "upstreamBase": "060ff208b7c2c82cad11785b8e3652bca11f49a6",
-  "version": "0.10.0-claudegpt.2",
+  "version": "0.10.0-claudegpt.3",
   "status": "released_installed_verified",
-  "sourceCommit": "1f773d8c01eabda141406b402518da5872407c59",
+  "sourceCommit": "7d9660f99a6e12ce370df3a509367381922c124f",
   "sourcePath": "apps/reframe",
   "specification": "docs/claudegpt-spec.md",
   "build": "maintenance/build-windows.ps1",
@@ -16,13 +16,13 @@
     "Reframe desktop",
     "installed thread-cleanup filesystem helper"
   ],
-  "release": "https://github.com/Darkaxt/reframe/releases/tag/v0.10.0-claudegpt.2",
-  "archiveSha256": "c5222c55338e721bb3ac33035afdc168789caca474442668788ef815876c0c26",
-  "executableSha256": "6468ad426f37889706d90a7ba473b0a338ba2ecaf2d03704fbe4a18460651cf6",
+  "release": "https://github.com/Darkaxt/reframe/releases/tag/v0.10.0-claudegpt.3",
+  "archiveSha256": "671248e86e323c47b2051e490c876ed97c521e7061a9ba0704da22b4cf149458",
+  "executableSha256": "9e7cc42f664efe95965fc9b34ce31b04351939a2a57cbe1ea473207f4451eb7b",
   "verificationLimits": [
     "Unsigned Windows portable release.",
-    "Native subscription/no-tool request verified separately from packaged routing fixtures; no real user conversation replay.",
-    "Installed native payload, responsive GUI, controlled provider binding, preserved settings, rollback and benign ChatGPT request verified. Native Anthropic request verified separately with the same dedicated binary."
+    "One-confirmation native bulk archive/delete, per-item skips/failures/shared-index preservation, selected provider/model persistence/resume and native quit/profile/owned-stop checks passed using fictional histories.",
+    "Installed native payload, responsive GUI, controlled provider bindings, protected settings, full .2 rollback and benign ChatGPT request verified. Prior native Anthropic no-tool request reused only for unchanged dedicated binary/proxy routing. No user conversation replay."
   ],
   "releasePinRequirement": "Normal published release independently retrieved and verified against the exact source and complete payload. Distinct native provider executables and persisted selections qualified. Hash-bound local activation and independent installed verification completed; private machine-specific receipts remain outside Git."
 }
