@@ -4,12 +4,25 @@
   "upstream": "https://github.com/TheyCallMeJuzou/reframe.git",
   "branch": "codex/claudegpt",
   "upstreamBase": "060ff208b7c2c82cad11785b8e3652bca11f49a6",
-  "version": "0.10.0-claudegpt.1",
-  "status": "source_integrated_release_pending_authentication",
-  "sourceCommit": "f24c44a93c0781dd427fb81b14684e11f049d846",
+  "version": "0.10.0-claudegpt.2",
+  "status": "released_qualified_waiting_safe_activation",
+  "sourceCommit": "1f773d8c01eabda141406b402518da5872407c59",
   "sourcePath": "apps/reframe",
   "specification": "docs/claudegpt-spec.md",
   "build": "maintenance/build-windows.ps1",
-  "runtimeComponents": ["managed Claude CLI", "ClaudeGPT proxy", "Reframe desktop", "installed thread-cleanup filesystem helper"],
-  "releasePinRequirement": "Source pin is locally qualified and remotely verified; real Anthropic subscription qualification and published release/installed activation remain pending. Update the component delivery provenance after final delivery."
+  "runtimeComponents": [
+    "managed Claude CLI",
+    "ClaudeGPT proxy",
+    "Reframe desktop",
+    "installed thread-cleanup filesystem helper"
+  ],
+  "release": "https://github.com/Darkaxt/reframe/releases/tag/v0.10.0-claudegpt.2",
+  "archiveSha256": "c5222c55338e721bb3ac33035afdc168789caca474442668788ef815876c0c26",
+  "executableSha256": "6468ad426f37889706d90a7ba473b0a338ba2ecaf2d03704fbe4a18460651cf6",
+  "verificationLimits": [
+    "Unsigned Windows portable release.",
+    "Native subscription/no-tool request verified separately from packaged routing fixtures; no real user conversation replay.",
+    "Activation awaits normal Reframe exit and an owner-reserved idle boundary."
+  ],
+  "releasePinRequirement": "Normal published release independently retrieved and verified against the exact source and complete payload. Distinct native provider executables and persisted selections qualified. Installation remains a separate private hash-bound activation and verification gate."
 }
